@@ -1,0 +1,11 @@
+streamlit
+folium
+streamlit-folium
+geopandas
+pyogrio
+rasterio
+numpy
+Pillow
+affine
+branca
+jinja2

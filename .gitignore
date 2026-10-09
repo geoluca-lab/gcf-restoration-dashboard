@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.vscode/
+.streamlit/secrets.toml
+
+*.aux.xml
+*.ovr
+*.tfw
+*.vat.dbf
+*.vat.cpg
