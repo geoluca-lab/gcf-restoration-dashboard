@@ -2518,7 +2518,7 @@ class LayerInfoControl(
 
 
                         mapTitle.innerHTML =
-                            "Ciblage des zones à potentiel de restauration – Tchad";
+                            "Ciblage des zones à potentiel de restauration – SCALE - GCF";
 
 
                         const layerTitle =
