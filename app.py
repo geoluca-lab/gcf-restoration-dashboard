@@ -51,27 +51,14 @@ st.markdown(
         font-family: "Arial Nova", Arial, sans-serif;
     }
 
-    header[data-testid="stHeader"] {
-        display: none !important;
-    }
-
-    footer {
-        display: none !important;
-    }
-
-    #MainMenu {
-        display: none !important;
-    }
-
+    header[data-testid="stHeader"],
+    footer,
+    #MainMenu,
     section[data-testid="stSidebar"] {
         display: none !important;
     }
 
-    div[data-testid="stAppViewContainer"] {
-        margin: 0 !important;
-        padding: 0 !important;
-    }
-
+    div[data-testid="stAppViewContainer"],
     div[data-testid="stAppViewContainer"] > .main {
         margin: 0 !important;
         padding: 0 !important;
@@ -105,12 +92,7 @@ st.markdown(
 # CHEMINS DES DONNEES
 # ==================================================
 
-# ==================================================
-# PERCORSI RELATIVI
-# ==================================================
-
 BASE_DIR = Path(__file__).resolve().parent
-
 
 gpkg_path = (
     BASE_DIR
@@ -119,7 +101,6 @@ gpkg_path = (
     / "GCF geo.gpkg"
 )
 
-
 restoration_raster_path = (
     BASE_DIR
     / "data"
@@ -127,16 +108,11 @@ restoration_raster_path = (
     / "TCD_restoration_suitability_moderate_conservative.tif"
 )
 
-
 population_raster_dir = (
     BASE_DIR
     / "data"
     / "raster"
 )
-
-# ==================================================
-# RASTER POPULATION
-# ==================================================
 
 population_raster_path = (
     population_raster_dir
@@ -151,9 +127,7 @@ population_raster_path = (
 @st.cache_data
 def get_available_layers(path):
 
-    layers = pyogrio.list_layers(
-        path
-    )
+    layers = pyogrio.list_layers(path)
 
     return layers[:, 0].tolist()
 
@@ -272,11 +246,7 @@ def load_suitability_raster(
 
         dst_crs = "EPSG:4326"
 
-        (
-            transform,
-            width,
-            height
-        ) = calculate_default_transform(
+        transform, width, height = calculate_default_transform(
             src.crs,
             dst_crs,
             src.width,
@@ -284,12 +254,10 @@ def load_suitability_raster(
             *src.bounds
         )
 
-
         largest_dimension = max(
             width,
             height
         )
-
 
         if largest_dimension > max_size:
 
@@ -319,7 +287,6 @@ def load_suitability_raster(
             width = new_width
             height = new_height
 
-
         data = np.zeros(
             (
                 height,
@@ -327,7 +294,6 @@ def load_suitability_raster(
             ),
             dtype=np.uint8
         )
-
 
         reproject(
             source=rasterio.band(
@@ -343,7 +309,6 @@ def load_suitability_raster(
             dst_nodata=0
         )
 
-
         rgba = np.zeros(
             (
                 height,
@@ -353,12 +318,7 @@ def load_suitability_raster(
             dtype=np.uint8
         )
 
-
-        # ------------------------------------------
-        # MODERATE = BLEU CLAIR
-        # #9ECAE1
-        # ------------------------------------------
-
+        # Moderate = bleu foncé
         moderate = (
             data == 1
         )
@@ -370,12 +330,7 @@ def load_suitability_raster(
             220
         ]
 
-
-        # ------------------------------------------
-        # CONSERVATIVE = BLEU FONCE
-        # #08519C
-        # ------------------------------------------
-
+        # Conservative = bleu plus foncé
         conservative = (
             data == 2
         )
@@ -386,7 +341,6 @@ def load_suitability_raster(
             107,
             230
         ]
-
 
         left = transform.c
         top = transform.f
@@ -401,12 +355,10 @@ def load_suitability_raster(
             + transform.e * height
         )
 
-
         bounds = [
             [bottom, left],
             [top, right]
         ]
-
 
         return (
             rgba,
@@ -432,15 +384,9 @@ def load_population_raster(
                 "Il raster di popolazione non ha un CRS definito."
             )
 
-
         dst_crs = "EPSG:4326"
 
-
-        (
-            transform,
-            width,
-            height
-        ) = calculate_default_transform(
+        transform, width, height = calculate_default_transform(
             src.crs,
             dst_crs,
             src.width,
@@ -448,12 +394,10 @@ def load_population_raster(
             *src.bounds
         )
 
-
         largest_dimension = max(
             width,
             height
         )
-
 
         if largest_dimension > max_size:
 
@@ -472,7 +416,6 @@ def load_population_raster(
                 int(height / scale)
             )
 
-
             transform = (
                 transform
                 * Affine.scale(
@@ -481,10 +424,8 @@ def load_population_raster(
                 )
             )
 
-
             width = new_width
             height = new_height
-
 
         data = np.full(
             (
@@ -494,7 +435,6 @@ def load_population_raster(
             np.nan,
             dtype=np.float32
         )
-
 
         reproject(
             source=rasterio.band(
@@ -510,12 +450,10 @@ def load_population_raster(
             dst_nodata=np.nan
         )
 
-
         valid = (
             np.isfinite(data)
             & (data > 0)
         )
-
 
         rgba = np.zeros(
             (
@@ -526,42 +464,29 @@ def load_population_raster(
             dtype=np.uint8
         )
 
-
         if valid.any():
-
-            # --------------------------------------
-            # STRETCH LOG PER VISUALIZZAZIONE
-            # --------------------------------------
 
             log_values = np.log1p(
                 data[valid]
             )
-
 
             vmin = np.percentile(
                 log_values,
                 2
             )
 
-
             vmax = np.percentile(
                 log_values,
                 98
             )
 
-
             if vmax <= vmin:
-
-                vmax = (
-                    vmin + 1
-                )
-
+                vmax = vmin + 1
 
             normalized = np.zeros(
                 data.shape,
                 dtype=np.float32
             )
-
 
             normalized[valid] = (
                 (
@@ -577,26 +502,17 @@ def load_population_raster(
                 )
             )
 
-
             normalized = np.clip(
                 normalized,
                 0,
                 1
             )
 
-
             x = normalized[
                 valid
             ]
 
-
-            # --------------------------------------
-            # GRIS CLAIR -> NOIR
-            #
-            # faible population = gris clair
-            # forte population = noir
-            # --------------------------------------
-
+            # Gris clair -> noir
             intensity = (
                 240
                 - x * 230
@@ -604,43 +520,28 @@ def load_population_raster(
                 np.uint8
             )
 
-
-            rgba[..., 0][valid] = (
-                intensity
-            )
-
-            rgba[..., 1][valid] = (
-                intensity
-            )
-
-            rgba[..., 2][valid] = (
-                intensity
-            )
-
+            rgba[..., 0][valid] = intensity
+            rgba[..., 1][valid] = intensity
+            rgba[..., 2][valid] = intensity
             rgba[..., 3][valid] = 210
-
 
         left = transform.c
         top = transform.f
-
 
         right = (
             left
             + transform.a * width
         )
 
-
         bottom = (
             top
             + transform.e * height
         )
 
-
         bounds = [
             [bottom, left],
             [top, right]
         ]
-
 
         return (
             rgba,
@@ -664,18 +565,13 @@ def add_vector_layer(
     if gdf.empty:
         return
 
-
     geometry_types = set(
         gdf.geometry.geom_type
         .dropna()
         .tolist()
     )
 
-
-    # ==================================================
-    # POINTS
-    # ==================================================
-
+    # Points
     if geometry_types.issubset(
         {
             "Point",
@@ -685,9 +581,7 @@ def add_vector_layer(
 
         folium.GeoJson(
             gdf,
-
             pane="points_pane",
-
             marker=folium.CircleMarker(
                 radius=radius,
                 color=color,
@@ -696,18 +590,12 @@ def add_vector_layer(
                 fill_color=color,
                 fill_opacity=0.9
             ),
-
             interactive=False
-
         ).add_to(
             group
         )
 
-
-    # ==================================================
-    # LIGNES
-    # ==================================================
-
+    # Lignes
     elif geometry_types.issubset(
         {
             "LineString",
@@ -717,42 +605,30 @@ def add_vector_layer(
 
         folium.GeoJson(
             gdf,
-
             pane="vector_pane",
-
             style_function=lambda feature: {
                 "color": color,
                 "weight": weight,
                 "opacity": 0.95
             },
-
             interactive=False
-
         ).add_to(
             group
         )
 
-
-    # ==================================================
-    # POLYGONES
-    # ==================================================
-
+    # Polygones
     else:
 
         folium.GeoJson(
             gdf,
-
             pane="vector_pane",
-
             style_function=lambda feature: {
                 "color": color,
                 "weight": weight,
                 "fillColor": color,
                 "fillOpacity": fill_opacity
             },
-
             interactive=False
-
         ).add_to(
             group
         )
@@ -767,23 +643,19 @@ aoi = load_vector_layer(
     LAYER_AOI
 )
 
-
 transhumance = load_vector_layer(
     gpkg_path,
     LAYER_TRANSHUMANCE
 )
-
 
 sites_pam = load_vector_layer(
     gpkg_path,
     LAYER_SITES_PAM
 )
 
-
 targetisation = load_vector_layer(
     gpkg_path,
     LAYER_TARGETISATION,
-
     keep_columns=[
         "GRID_ID",
         "Pop",
@@ -804,18 +676,11 @@ targetisation = load_vector_layer(
 # CHARGEMENT DES RASTERS
 # ==================================================
 
-(
-    population_img,
-    population_bounds
-) = load_population_raster(
+population_img, population_bounds = load_population_raster(
     population_raster_path
 )
 
-
-(
-    suitability_img,
-    suitability_bounds
-) = load_suitability_raster(
+suitability_img, suitability_bounds = load_suitability_raster(
     restoration_raster_path
 )
 
@@ -824,18 +689,11 @@ targetisation = load_vector_layer(
 # EXTENT
 # ==================================================
 
-(
-    minx,
-    miny,
-    maxx,
-    maxy
-) = aoi.total_bounds
-
+minx, miny, maxx, maxy = aoi.total_bounds
 
 center_lat = (
     miny + maxy
 ) / 2
-
 
 center_lon = (
     minx + maxx
@@ -860,50 +718,31 @@ m = folium.Map(
 
 # ==================================================
 # PANES
-#
-# Ordre visuel fixe:
-#
-# 460  Sites PAM
-# 450  Lignes / AOI
-# 430  Rasters
-# 410  Targetisation
-# 200  Basemap
 # ==================================================
 
 folium.map.CustomPane(
     "targetisation_pane",
     z_index=410,
     pointer_events=True
-).add_to(
-    m
-)
-
+).add_to(m)
 
 folium.map.CustomPane(
     "raster_pane",
     z_index=430,
     pointer_events=False
-).add_to(
-    m
-)
-
+).add_to(m)
 
 folium.map.CustomPane(
     "vector_pane",
     z_index=450,
     pointer_events=False
-).add_to(
-    m
-)
-
+).add_to(m)
 
 folium.map.CustomPane(
     "points_pane",
     z_index=460,
     pointer_events=False
-).add_to(
-    m
-)
+).add_to(m)
 
 
 # ==================================================
@@ -916,34 +755,23 @@ folium.TileLayer(
     overlay=False,
     control=True,
     show=True
-).add_to(
-    m
-)
+).add_to(m)
 
 
 folium.TileLayer(
-
     tiles=(
         "https://server.arcgisonline.com/ArcGIS/rest/services/"
         "World_Imagery/MapServer/tile/{z}/{y}/{x}"
     ),
-
     attr=(
         "Esri, Maxar, Earthstar Geographics, "
         "and the GIS User Community"
     ),
-
     name="Imagerie satellite",
-
     overlay=False,
-
     control=True,
-
     show=False
-
-).add_to(
-    m
-)
+).add_to(m)
 
 
 # ==================================================
@@ -957,9 +785,7 @@ target_group = folium.FeatureGroup(
     show=True
 )
 
-target_group.add_to(
-    m
-)
+target_group.add_to(m)
 
 
 population_group = folium.FeatureGroup(
@@ -969,9 +795,7 @@ population_group = folium.FeatureGroup(
     show=False
 )
 
-population_group.add_to(
-    m
-)
+population_group.add_to(m)
 
 
 restoration_group = folium.FeatureGroup(
@@ -981,9 +805,7 @@ restoration_group = folium.FeatureGroup(
     show=False
 )
 
-restoration_group.add_to(
-    m
-)
+restoration_group.add_to(m)
 
 
 aoi_group = folium.FeatureGroup(
@@ -993,9 +815,7 @@ aoi_group = folium.FeatureGroup(
     show=False
 )
 
-aoi_group.add_to(
-    m
-)
+aoi_group.add_to(m)
 
 
 transhumance_group = folium.FeatureGroup(
@@ -1005,9 +825,7 @@ transhumance_group = folium.FeatureGroup(
     show=False
 )
 
-transhumance_group.add_to(
-    m
-)
+transhumance_group.add_to(m)
 
 
 sites_group = folium.FeatureGroup(
@@ -1017,15 +835,11 @@ sites_group = folium.FeatureGroup(
     show=False
 )
 
-sites_group.add_to(
-    m
-)
+sites_group.add_to(m)
 
 
 # ==================================================
 # POPULATION
-#
-# Raster sopra Targetisation
 # ==================================================
 
 folium.raster_layers.ImageOverlay(
@@ -1040,8 +854,6 @@ folium.raster_layers.ImageOverlay(
 
 # ==================================================
 # POTENTIEL DE RESTAURATION
-#
-# Raster sopra Targetisation
 # ==================================================
 
 folium.raster_layers.ImageOverlay(
@@ -1059,20 +871,15 @@ folium.raster_layers.ImageOverlay(
 # ==================================================
 
 folium.GeoJson(
-
     aoi,
-
     pane="vector_pane",
-
     style_function=lambda feature: {
         "color": "#58595a",
         "weight": 3,
         "fillColor": "#58595a",
         "fillOpacity": 0
     },
-
     interactive=False
-
 ).add_to(
     aoi_group
 )
@@ -1109,13 +916,11 @@ add_vector_layer(
 
 pam_distance_field = None
 
-
 if "NEAR_DIST_PAM" in targetisation.columns:
 
     pam_distance_field = (
         "NEAR_DIST_PAM"
     )
-
 
 elif "NEAR_DIST_PAM_SITE" in targetisation.columns:
 
@@ -1133,9 +938,7 @@ if "Pop" in targetisation.columns:
     targetisation[
         "Population_display"
     ] = (
-        targetisation[
-            "Pop"
-        ]
+        targetisation["Pop"]
         .round(0)
         .astype("Int64")
         .astype(str)
@@ -1147,27 +950,32 @@ if "cand_pct" in targetisation.columns:
     targetisation[
         "Rangeland_display"
     ] = (
-        targetisation[
-            "cand_pct"
-        ]
+        targetisation["cand_pct"]
         .round(1)
         .astype(str)
         + " %"
     )
 
 
+# ==================================================
+# DISTANCE TRANSHUMANCE EN KM
+# ==================================================
+
 if "NEAR_DIST" in targetisation.columns:
 
     targetisation[
         "Transhumance_display"
     ] = (
-        targetisation[
-            "NEAR_DIST"
-        ]
+        targetisation["NEAR_DIST"]
         .round(2)
         .astype(str)
+        + " km"
     )
 
+
+# ==================================================
+# DISTANCE SITE PAM EN KM
+# ==================================================
 
 if pam_distance_field is not None:
 
@@ -1185,6 +993,8 @@ if pam_distance_field is not None:
 
 # ==================================================
 # SYMBOLOGIE TARGETISATION
+#
+# Score possible : 1 à 7
 # ==================================================
 
 def target_style(feature):
@@ -1197,7 +1007,6 @@ def target_style(feature):
             "target_score"
         )
     )
-
 
     try:
 
@@ -1215,17 +1024,14 @@ def target_style(feature):
 
     colors = {
 
-        2: "#FFF7EC",
-
-        3: "#FEE8C8",
-
-        4: "#FDD49E",
-
+        1: "#FFF7EC",
+        2: "#FEE8C8",
+        3: "#FDD49E",
+        4: "#FDBB84",
         5: "#FC8D59",
-
         6: "#E34A33",
-
         7: "#B30000"
+
     }
 
 
@@ -1266,7 +1072,7 @@ tooltip_aliases = [
     "Score de ciblage :",
     "Population dans l'hexagone :",
     "Part de l'hexagone en rangeland à potentiel de restauration :",
-    "Distance à la route de transhumance :"
+    "Distance minimale à la route de transhumance la plus proche :"
 ]
 
 
@@ -1277,7 +1083,7 @@ if pam_distance_field is not None:
     )
 
     tooltip_aliases.append(
-        "Distance au site PAM :"
+        "Distance minimale au site d'intervention PAM le plus proche :"
     )
 
 
@@ -1306,37 +1112,20 @@ for field, alias in zip(
 # ==================================================
 
 folium.GeoJson(
-
     targetisation,
-
     pane="targetisation_pane",
-
     style_function=target_style,
-
     highlight_function=lambda feature: {
-
-        "weight":
-            2.5,
-
-        "color":
-            "#222222",
-
-        "fillOpacity":
-            0.90
+        "weight": 2.5,
+        "color": "#222222",
+        "fillOpacity": 0.90
     },
-
     tooltip=folium.GeoJsonTooltip(
-
         fields=valid_fields,
-
         aliases=valid_aliases,
-
         sticky=True,
-
         labels=True,
-
         localize=True,
-
         style=(
             "background-color:white;"
             "color:#333333;"
@@ -1347,7 +1136,6 @@ folium.GeoJson(
             "box-shadow:0 1px 5px rgba(0,0,0,0.25);"
         )
     )
-
 ).add_to(
     target_group
 )
@@ -1395,7 +1183,9 @@ layer_panels = {
 
             <li>
                 la population estimée dans chaque hexagone,
-                classée en <b>3 catégories</b> ;
+                classée en <b>3 catégories</b>.
+                En l'absence de population, la classe de
+                population prend la valeur <b>0</b> ;
             </li>
 
             <li>
@@ -1415,8 +1205,8 @@ layer_panels = {
 
         <br><br>
 
-        Le score théorique varie de
-        <b>2 à 7</b>.
+        Le score varie de
+        <b>1 à 7</b>.
 
         Un score élevé correspond à un hexagone combinant
         une population relativement élevée et une proportion
@@ -1425,10 +1215,19 @@ layer_panels = {
 
         <br><br>
 
-        Les distances aux routes de transhumance
-        et aux sites PAM sont affichées comme
-        informations complémentaires et ne sont pas
-        intégrées au score.
+        Deux indicateurs de distance sont également présentés
+        comme informations complémentaires :
+        la distance minimale à la route de transhumance
+        la plus proche et la distance minimale au
+        site d'intervention PAM le plus proche.
+
+        <br><br>
+
+        Ces distances sont exprimées en
+        <b>kilomètres</b> et sont calculées
+        <b>à partir du centroïde de chaque hexagone</b>.
+
+        Elles ne sont pas intégrées au score de ciblage.
 
     </div>
 
@@ -1442,19 +1241,26 @@ layer_panels = {
         <span class="square"
               style="background:#FFF7EC;">
         </span>
-        2
+        1
     </div>
 
     <div class="legend-row">
         <span class="square"
               style="background:#FEE8C8;">
         </span>
-        3
+        2
     </div>
 
     <div class="legend-row">
         <span class="square"
               style="background:#FDD49E;">
+        </span>
+        3
+    </div>
+
+    <div class="legend-row">
+        <span class="square"
+              style="background:#FDBB84;">
         </span>
         4
     </div>
@@ -1698,9 +1504,14 @@ layer_panels = {
 
         <br><br>
 
-        Pour chaque hexagone, la distance à la route
-        de transhumance la plus proche est calculée
-        comme information complémentaire pour la priorisation.
+        Pour chaque hexagone, la
+        <b>distance minimale entre son centroïde
+        et la route de transhumance la plus proche</b>
+        est calculée.
+
+        La distance est exprimée en
+        <b>kilomètres</b> et constitue une information
+        complémentaire pour la priorisation.
 
         <br><br>
 
@@ -1748,13 +1559,18 @@ layer_panels = {
     <div class="info-text">
 
         Cette couche représente les
-        <b>sites du Programme alimentaire mondial (PAM)</b>
-        considérés dans l'analyse.
+        <b>sites d'intervention du Programme alimentaire mondial
+        (PAM)</b> considérés dans l'analyse.
 
         <br><br>
 
-        Pour chaque hexagone, la distance au site PAM
-        le plus proche est calculée comme information
+        Pour chaque hexagone, la
+        <b>distance minimale entre son centroïde
+        et le site d'intervention PAM le plus proche</b>
+        est calculée.
+
+        La distance est exprimée en
+        <b>kilomètres</b> et constitue une information
         complémentaire pour la priorisation.
 
         <br><br>
@@ -1784,7 +1600,7 @@ layer_panels = {
         <span class="point-symbol">
         </span>
 
-        Site PAM
+        Site d'intervention PAM
 
     </div>
     """
@@ -1858,7 +1674,6 @@ class LayerInfoControl(
             {% macro header(this, kwargs) %}
 
             <style>
-
 
             /* =====================================
                LAYER CONTROL
@@ -2546,10 +2361,6 @@ class LayerInfoControl(
 
                     }
 
-
-                    /* =================================
-                       ORDRE DES COUCHES DANS LA LISTE
-                    ================================= */
 
                     if (overlays) {
 
