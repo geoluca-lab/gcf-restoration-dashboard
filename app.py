@@ -176,12 +176,13 @@ LAYER_TRANSHUMANCE = resolve_layer_name(
 # CHARGEMENT VECTEURS
 # ==================================================
 
-@st.cache_data
-def load_vector_layer(
-    path,
-    layer_name,
-    keep_columns=None
-):
+def get_available_layers(path):
+
+    layers = pyogrio.list_layers(
+        path
+    )
+
+    return layers[:, 0].tolist()
 
     gdf = gpd.read_file(
         path,
