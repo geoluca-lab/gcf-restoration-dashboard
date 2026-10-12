@@ -156,7 +156,7 @@ def resolve_layer_name(simple_name):
 
 
 LAYER_TARGETISATION = resolve_layer_name(
-    "hexagons_restoration_1_2"
+    "hexa_target"
 )
 
 LAYER_AOI = resolve_layer_name(
@@ -966,12 +966,11 @@ if "NEAR_DIST" in targetisation.columns:
     targetisation[
         "Transhumance_display"
     ] = (
-        targetisation["NEAR_DIST"]
+        (targetisation["NEAR_DIST"] / 1000)
         .round(2)
         .astype(str)
         + " km"
     )
-
 
 # ==================================================
 # DISTANCE SITE PAM EN KM
@@ -982,9 +981,7 @@ if pam_distance_field is not None:
     targetisation[
         "PAM_display"
     ] = (
-        targetisation[
-            pam_distance_field
-        ]
+        (targetisation[pam_distance_field] / 1000)
         .round(2)
         .astype(str)
         + " km"
