@@ -1,4 +1,5 @@
 import base64
+import hashlib
 
 import streamlit as st
 
@@ -1334,6 +1335,7 @@ def clicked_hex_id(event, hexagons):
 selection_data = prepare_hex_selection_data(targetisation)
 st.session_state.setdefault("selected_hex_ids", set())
 st.session_state.setdefault("hex_comments", {})
+st.session_state.setdefault("last_restored_csv_signature", None)
 st.session_state.selected_hex_ids = set(st.session_state.selected_hex_ids) & set(
     selection_data["GRID_ID"]
 )
@@ -1359,6 +1361,11 @@ def clear_hex_selection():
 
 def normalize_hex_id_value(value):
     return str(value).strip()
+
+
+def uploaded_file_signature(uploaded_file):
+    """Stable signature so an uploaded CSV is processed only once per content version."""
+    return hashlib.sha256(uploaded_file.getvalue()).hexdigest()
 
 
 def restore_hex_selection_from_csv(uploaded_file):
@@ -1540,15 +1547,27 @@ def render_selection_summary(hexagons, detail_data, detail_fields, detail_aliase
                         key="hex_selection_restore_upload",
                     )
                     if uploaded_selection is not None:
-                        try:
-                            restored_ids = restore_hex_selection_from_csv(uploaded_selection)
-                            if restored_ids is not None:
-                                st.toast(
-                                    f"Sélection restaurée : {len(restored_ids)} hexagones.",
-                                    icon="✅",
-                                )
-                        except ValueError as exc:
-                            st.toast(str(exc), icon="⚠️")
+                        signature = uploaded_file_signature(uploaded_selection)
+                        if signature != st.session_state.get("last_restored_csv_signature"):
+                            try:
+                                restored_ids = restore_hex_selection_from_csv(uploaded_selection)
+                                if restored_ids is not None:
+                                    st.session_state.last_restored_csv_signature = signature
+                                    st.session_state.restore_selection_toast = (
+                                        f"Sélection restaurée : {len(restored_ids)} hexagones."
+                                    )
+                                    # The map GeoJSON and its tooltip are built earlier in the run.
+                                    # Rerun once so restored comments are injected before map creation.
+                                    st.rerun()
+                            except ValueError as exc:
+                                st.toast(str(exc), icon="⚠️")
+                    else:
+                        # Allow the same CSV to be uploaded again after the uploader is cleared.
+                        st.session_state.last_restored_csv_signature = None
+
+                    restore_toast = st.session_state.pop("restore_selection_toast", None)
+                    if restore_toast:
+                        st.toast(restore_toast, icon="✅")
 
         with totals_col:
             population = selected["Pop"].sum() if "Pop" in selected else 0
