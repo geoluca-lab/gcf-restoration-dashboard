@@ -1,4 +1,8 @@
+import base64
+
 import streamlit as st
+
+import pandas as pd
 
 import folium
 
@@ -11,6 +15,8 @@ import pyogrio
 import numpy as np
 
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
 
@@ -22,7 +28,8 @@ from branca.element import MacroElement
 
 from jinja2 import Template
 
-from streamlit_folium import folium_static
+from streamlit_folium import st_folium
+from shapely.geometry import Point
 
 
 
@@ -188,6 +195,14 @@ st.markdown(
 
 BASE_DIR = Path(__file__).resolve().parent
 
+ANNEX_PDF_PATH = BASE_DIR / "data" / "Annex.pdf"
+
+ANNEX_PDF_DATA_URL = ""
+if ANNEX_PDF_PATH.exists():
+    ANNEX_PDF_DATA_URL = (
+        "data:application/pdf;base64,"
+        + base64.b64encode(ANNEX_PDF_PATH.read_bytes()).decode("ascii")
+    )
 
 
 gpkg_path = (
@@ -351,7 +366,8 @@ LAYER_TRANSHUMANCE = resolve_layer_name(
 def load_vector_layer(
     path,
     layer_name,
-    keep_columns=None
+    keep_columns=None,
+    preserve_attributes=False
 ):
     gdf = gpd.read_file(
         path,
@@ -382,7 +398,7 @@ def load_vector_layer(
             existing_columns + ["geometry"]
         ]
 
-    else:
+    elif not preserve_attributes:
         gdf = gdf[["geometry"]]
 
     return gdf
@@ -1248,36 +1264,342 @@ targetisation = load_vector_layer(
 
     LAYER_TARGETISATION,
 
-    keep_columns=[
-
-        "GRID_ID",
-
-        "Pop",
-
-        "pop_class_1",
-
-        "pop_label",
-
-        "cand_pct",
-
-        "cand_class",
-
-        "cand_label",
-
-        "target_score",
-
-        "NEAR_DIST",
-
-        "NEAR_DIST_PAM",
-
-        "NEAR_DIST_PAM_SITE"
-
-    ]
-
+    preserve_attributes=True
 )
 
 
 
+
+
+# ==================================================
+# HEXAGON SELECTION - source attributes remain available for CSV export.
+# ==================================================
+
+
+def prepare_hex_selection_data(hexagons):
+    """Measure polygon area in local UTM metres, retaining source attributes."""
+    if hexagons["GRID_ID"].isna().any() or not hexagons["GRID_ID"].is_unique:
+        raise ValueError("hexa_target must have a unique, non-null GRID_ID.")
+    result = hexagons.copy()
+    result["GRID_ID"] = result["GRID_ID"].astype(str)
+    # The current Chad extent lies in UTM zone 34N (EPSG:32634).
+    area_crs = result.estimate_utm_crs()
+    if area_crs is None:
+        raise ValueError("Cannot determine a projected CRS for hexagon areas.")
+    result["hex_area_ha"] = result.to_crs(area_crs).geometry.area / 10000
+    # Inspection: cand_ha = (VALUE_12 + VALUE_23) / 10000 and
+    # cand_pct = round(cand_ha / 2500 * 100, 1). Edge hexagons are clipped,
+    # so multiplying their actual area by this rounded percentage understates
+    # the source restoration area. Prefer the existing, unrounded cand_ha.
+    if "cand_pct" in result:
+        result["restoration_potential_pct_estimate_ha"] = (
+            result["hex_area_ha"] * result["cand_pct"] / 100
+        )
+    if "cand_ha" in result:
+        result["restoration_potential_ha"] = result["cand_ha"]
+    elif "cand_pct" in result:
+        result["restoration_potential_ha"] = result[
+            "restoration_potential_pct_estimate_ha"
+        ]
+    return result
+
+
+def toggle_hex_selection(selected_ids, grid_id):
+    """Return a set so repeated IDs can never create duplicate selections."""
+    selected_ids = set(selected_ids)
+    if grid_id in selected_ids:
+        selected_ids.remove(grid_id)
+    else:
+        selected_ids.add(grid_id)
+    return selected_ids
+
+
+def clicked_hex_id(event, hexagons):
+    """Read GRID_ID from the clicked GeoJSON, never from formatted tooltip text."""
+    feature = event.get("last_active_drawing") or {}
+    grid_id = (feature.get("properties") or {}).get("GRID_ID")
+    location = event.get("last_object_clicked")
+    if grid_id is None or not location:
+        return None
+    grid_id = str(grid_id)
+    candidates = hexagons.loc[hexagons["GRID_ID"] == grid_id]
+    # streamlit-folium retains the previous feature on some non-feature clicks.
+    # Verify its geometry against the current click before accepting the ID.
+    point = Point(location["lng"], location["lat"])
+    if not candidates.empty and candidates.geometry.covers(point).any():
+        return grid_id
+    return None
+
+
+selection_data = prepare_hex_selection_data(targetisation)
+st.session_state.setdefault("selected_hex_ids", set())
+st.session_state.setdefault("hex_comments", {})
+st.session_state.selected_hex_ids = set(st.session_state.selected_hex_ids) & set(
+    selection_data["GRID_ID"]
+)
+
+
+def handle_hex_click():
+    """Component callback runs before rerendering the summary and highlight."""
+    event = st.session_state.get("hex_selection_map", {})
+    count = event.get("last_object_clicked_count")
+    if not count or count == st.session_state.get("hex_selection_click_count"):
+        return
+    st.session_state.hex_selection_click_count = count
+    grid_id = clicked_hex_id(event, selection_data)
+    if grid_id is not None:
+        st.session_state.selected_hex_ids = toggle_hex_selection(
+            st.session_state.selected_hex_ids, grid_id
+        )
+
+
+def clear_hex_selection():
+    st.session_state.selected_hex_ids = set()
+
+
+def normalize_hex_id_value(value):
+    return str(value).strip()
+
+
+def restore_hex_selection_from_csv(uploaded_file):
+    """Restore a selection from a previously exported CSV using GRID_ID."""
+    if uploaded_file is None:
+        return None
+    try:
+        df = pd.read_csv(uploaded_file)
+    except Exception as exc:
+        raise ValueError(f"Le fichier CSV est invalide : {exc}") from exc
+
+    grid_id_columns = []
+    for column in df.columns:
+        normalized = "".join(ch for ch in str(column).lower() if ch.isalnum())
+        if normalized in {"gridid", "idhexagone", "hexagonid"}:
+            grid_id_columns.append(column)
+
+    comment_columns = []
+    for column in df.columns:
+        normalized = "".join(ch for ch in str(column).lower() if ch.isalnum())
+        if normalized in {"commentaire", "comment", "commentaries", "notes", "note", "remarks", "remark"}:
+            comment_columns.append(column)
+
+    if not grid_id_columns:
+        raise ValueError(
+            "Aucune colonne de GRID_ID n'a été trouvée. "
+            "Le fichier doit contenir l'identifiant de l'hexagone."
+        )
+
+    ids = set()
+    restored_comments = {}
+    for _, row in df.iterrows():
+        for column in grid_id_columns:
+            grid_id = normalize_hex_id_value(row.get(column))
+            if not grid_id:
+                continue
+            if grid_id not in set(selection_data["GRID_ID"].astype(str)):
+                continue
+            ids.add(grid_id)
+            comment_value = ""
+            for comment_column in comment_columns:
+                candidate = row.get(comment_column)
+                if pd.notna(candidate) and str(candidate).strip():
+                    comment_value = str(candidate).strip()
+                    break
+            if comment_value:
+                restored_comments[grid_id] = comment_value
+            break
+
+    if not ids:
+        raise ValueError(
+            "Aucun identifiant d'hexagone valide n'a été trouvé dans ce CSV."
+        )
+
+    st.session_state.selected_hex_ids = set(ids)
+    st.session_state.hex_comments = restored_comments
+    return set(ids)
+
+
+class HexSelectionStyle(MacroElement):
+    """Update existing paths through st_folium's dynamic feature-group channel.
+
+    Keeping selection out of the base map script preserves the component key,
+    viewport, open controls and layer visibility through Streamlit reruns.
+    """
+
+    _template = Template("""
+        {% macro script(this, kwargs) %}
+        (function () {
+            const hexLayer = {{ this.hex_layer.get_name() }};
+            hexLayer.selectedHexIds = new Set({{ this.selected_ids | tojson }});
+            if (!hexLayer.selectionResetStyle) {
+                const originalReset = hexLayer.resetStyle;
+                hexLayer.resetStyle = function (layer) {
+                    originalReset.call(this, layer);
+                    const applySelection = (path) => {
+                        if (path.feature && this.selectedHexIds.has(
+                                String(path.feature.properties.GRID_ID))) {
+                            path.setStyle({color: '#00A6C7', weight: 3.5,
+                                           opacity: 1, fillOpacity: 0.90});
+                        }
+                    };
+                    if (layer) { applySelection(layer); }
+                    else { this.eachLayer(applySelection); }
+                    return this;
+                };
+                hexLayer.selectionResetStyle = true;
+            }
+            hexLayer.resetStyle();
+        })();
+        {% endmacro %}
+    """)
+
+    def __init__(self, hex_layer, selected_ids):
+        super().__init__()
+        self._name = "HexSelectionStyle"
+        self.hex_layer = hex_layer
+        self.selected_ids = sorted(selected_ids)
+
+
+def render_selection_summary(hexagons, detail_data, detail_fields, detail_aliases):
+    selected = hexagons.loc[
+        hexagons["GRID_ID"].isin(st.session_state.selected_hex_ids)
+    ]
+    # Keep tooltip labels and formatting, adding both component scores before
+    # the combined targeting score in the CSV only.
+    export_fields = list(detail_fields)
+    export_labels = {
+        field: alias.rstrip(" :")
+        for field, alias in zip(detail_fields, detail_aliases)
+    }
+    score_position = export_fields.index("target_score")
+    for field, label in (
+        ("pop_class_1", "Score de Population"),
+        ("cand_class", "Score potentiel de restauration"),
+    ):
+        if field in detail_data.columns:
+            export_fields.insert(score_position, field)
+            export_labels[field] = label
+            score_position += 1
+    details = detail_data.loc[
+        detail_data["GRID_ID"].isin(st.session_state.selected_hex_ids),
+        export_fields,
+    ].copy()
+    details["Commentaire"] = details["GRID_ID"].map(
+        st.session_state.get("hex_comments", {})
+    ).fillna("")
+    centroid_frame = selected[["GRID_ID"]].copy()
+    centroid_frame["centroid_x"] = selected.geometry.centroid.x
+    centroid_frame["centroid_y"] = selected.geometry.centroid.y
+    details = details.merge(centroid_frame, on="GRID_ID", how="left")
+    export_labels = {
+        **export_labels,
+        "centroid_x": "X du centroïde",
+        "centroid_y": "Y du centroïde",
+        "Commentaire": "Commentaire",
+    }
+    details = details.rename(columns=export_labels)
+    with st.container(key="hex_selection_panel"):
+        import_col, totals_col, actions_col = st.columns([2.0, 3.5, 2])
+
+        with actions_col:
+            clear_col, download_col = st.columns(2)
+
+        with import_col:
+            with st.container(key="hex_restore_import_block"):
+                import_label_col, import_upload_col = st.columns(
+                    [6.2, 1.0],
+                    vertical_alignment="top",
+                    gap="small",
+                )
+
+                with import_label_col:
+                    st.markdown(
+                        """
+                        <div class='selection-restore-copy' style='
+                            font-size:10px;
+                            font-weight:400;
+                            color:#666;
+                            white-space:normal;
+                            line-height:1.1;
+                            padding: 0;
+                            margin: 0;
+                            box-sizing: border-box;
+                            min-height: 0;
+                            display: flex;
+                            align-items: center;
+                        '>
+                            Rechargez un CSV une sélection précédente.
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                with import_upload_col:
+                    uploaded_selection = st.file_uploader(
+                        "",
+                        type=["csv"],
+                        key="hex_selection_restore_upload",
+                    )
+                    if uploaded_selection is not None:
+                        try:
+                            restored_ids = restore_hex_selection_from_csv(uploaded_selection)
+                            if restored_ids is not None:
+                                st.toast(
+                                    f"Sélection restaurée : {len(restored_ids)} hexagones.",
+                                    icon="✅",
+                                )
+                        except ValueError as exc:
+                            st.toast(str(exc), icon="⚠️")
+
+        with totals_col:
+            population = selected["Pop"].sum() if "Pop" in selected else 0
+            restoration = selected["restoration_potential_ha"].sum()
+            total_area = selected["hex_area_ha"].sum()
+            st.markdown(
+                '<div class="hex-selection-totals">'
+                '<div><strong>Sélection actuelle</strong></div>'
+                '<table style="width:100%; border-collapse:collapse; margin-top:4px; table-layout:fixed; white-space:nowrap;">'
+                '<tr>'
+                '<td style="padding:1px 10px 1px 0; width:25%; white-space:nowrap;">Hexagones :</td>'
+                f'<td style="padding:1px 10px 1px 0; width:25%; text-align:right; white-space:nowrap;"><strong>{len(selected):,}</strong></td>'
+                '<td style="padding:1px 10px 1px 0; width:25%; white-space:nowrap;">Surface :</td>'
+                f'<td style="padding:1px 0; width:25%; text-align:right; white-space:nowrap;"><strong>{total_area:,.1f} ha</strong></td>'
+                '</tr>'
+                '<tr>'
+                '<td style="padding:1px 10px 1px 0; width:25%; white-space:nowrap;">Population :</td>'
+                f'<td style="padding:1px 10px 1px 0; width:25%; text-align:right; white-space:nowrap;"><strong>{population:,.0f}</strong></td>'
+                '<td style="padding:1px 10px 1px 0; width:25%; white-space:nowrap;">Potentiel de restauration :</td>'
+                f'<td style="padding:1px 0; width:25%; text-align:right; white-space:nowrap;"><strong>{restoration:,.1f} ha</strong></td>'
+                '</tr>'
+                '</table>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+            if not selected.empty:
+                missing = selected[[c for c in ("Pop", "restoration_potential_ha")
+                                    if c in selected]].isna().sum()
+                if missing.any():
+                    st.caption("Valeurs manquantes exclues des totaux : " + ", ".join(
+                        f"{name} ({count})" for name, count in missing.items() if count
+                    ))
+
+        with clear_col:
+            st.button(
+                "Effacer",
+                on_click=clear_hex_selection,
+                use_container_width=True,
+            )
+
+        with download_col:
+            st.download_button(
+                "Télécharger",
+                details.to_csv(index=False)
+                .encode("utf-8-sig"),
+                file_name=f"{datetime.now(ZoneInfo('Africa/Ndjamena')).strftime('%Y-%m-%d')}_selected_hexagons.csv",
+                mime="text/csv",
+                disabled=selected.empty,
+                use_container_width=True,
+            )
 
 
 # ==================================================
@@ -1354,7 +1676,7 @@ m = folium.Map(
 
     ],
 
-    zoom_start=7,
+    zoom_start=8,
 
     tiles=None,
 
@@ -1364,8 +1686,23 @@ m = folium.Map(
 
 )
 
-
-
+# st_folium supplies a pixel height, while the dashboard iframe fills the
+# viewport. Keep Leaflet's own container at that same visible height so its
+# bottom-right descriptions and bottom-left scale cannot fall below the frame.
+m.get_root().header.add_child(folium.Element("""
+<style>
+html, body { margin: 0; height: 100%; overflow: hidden; }
+#map_div { width: 100% !important; height: 100vh !important; height: 100dvh !important; }
+.leaflet-control-zoom { margin-top: 6px !important; margin-right: 6px !important; margin-left: 0 !important; display: block !important; }
+.leaflet-top.leaflet-left .leaflet-control-layers { margin-top: 4px !important; margin-left: 4px !important; }
+.hex-tooltip table { max-width: 430px; }
+.hex-tooltip table tr:last-child { display: block; margin-top: 6px; padding-top: 6px; border-top: 1px solid #dddddd; }
+.hex-tooltip table tr:last-child th { display: none !important; }
+.hex-tooltip table tr:last-child td { display: block !important; width: 100% !important; max-width: 430px; white-space: normal !important; overflow-wrap: anywhere; word-break: break-word; line-height: 1.35; }
+.leaflet-control-scale { margin-left: 12px !important; margin-bottom: 10px !important; display: block !important; }
+.leaflet-control-scale-line { background: rgba(255,255,255,0.9) !important; border: 1px solid rgba(0,0,0,0.25) !important; border-top: none !important; color: #222 !important; }
+</style>
+"""))
 
 
 # ==================================================
@@ -1482,6 +1819,32 @@ folium.TileLayer(
 
 
 
+worldcover_layer = folium.WmsTileLayer(
+
+    url="https://mapproxy.terrascope.be/mapproxy/service",
+
+    layers="esa-worldcover-map-10m-2021-v2_map",
+
+    name="Couverture du sol (2021)",
+
+    fmt="image/png",
+
+    transparent=False,
+
+    overlay=False,
+
+    control=True,
+
+    show=False,
+
+    opacity=1.0,
+
+    attr="ESA WorldCover 2021 v2"
+
+).add_to(m)
+
+
+
 
 
 # ==================================================
@@ -1494,7 +1857,7 @@ folium.TileLayer(
 
 target_group = folium.FeatureGroup(
 
-    name="Targetisation",
+    name="Score final de ciblage",
 
     overlay=True,
 
@@ -1514,7 +1877,7 @@ target_group.add_to(m)
 
 population_group = folium.FeatureGroup(
 
-    name="Population",
+    name="Population estimée (2026)",
 
     overlay=True,
 
@@ -1534,7 +1897,7 @@ population_group.add_to(m)
 
 restoration_group = folium.FeatureGroup(
 
-    name="Potentiel de restauration",
+    name="Parcours pastoraux présentant un potentiel de restauration",
 
     overlay=True,
 
@@ -1594,7 +1957,7 @@ transhumance_group.add_to(m)
 
 sites_group = folium.FeatureGroup(
 
-    name="Sites PAM",
+    name="Sites d’intervention du PAM",
 
     overlay=True,
 
@@ -1826,6 +2189,13 @@ if "Pop" in targetisation.columns:
 
 
 
+if "cand_ha" in targetisation.columns:
+
+    targetisation["Degraded_rangeland_display"] = (
+        targetisation["cand_ha"].round(1).astype(str) + " ha"
+    )
+
+
 if "cand_pct" in targetisation.columns:
 
 
@@ -2046,15 +2416,34 @@ def target_style(feature):
 
 
 
+# A missing OSM name means the locality is not recorded in this dataset.
+if "name" in targetisation.columns:
+    targetisation["Localite_display"] = targetisation["name"].fillna(
+        "-"
+    )
+
+comments_by_grid_id = st.session_state.get("hex_comments", {})
+targetisation["Commentaire"] = targetisation["GRID_ID"].map(
+    comments_by_grid_id
+).fillna("")
+
 tooltip_fields = [
 
     "GRID_ID",
+
+    "adm1_name",
+
+    "adm2_name",
+
+    "Localite_display",
 
     "target_score",
 
     "Population_display",
 
     "Rangeland_display",
+
+    "Degraded_rangeland_display",
 
     "Transhumance_display"
 
@@ -2068,11 +2457,19 @@ tooltip_aliases = [
 
     "ID hexagone :",
 
+    "Province de l'hexagone (centroïde) :",
+
+    "Département de l'hexagone (centroïde) :",
+
+    "Localité dans l'hexagone (OSM) :",
+
     "Score de ciblage :",
 
     "Population dans l'hexagone :",
 
-    "Part de l'hexagone en rangeland à potentiel de restauration :",
+    "Part de l'hexagone en parcours pastoraux présentant un potentiel de restauration :",
+
+    "Superficie des parcours pastoraux présentant un potentiel de restauration :",
 
     "Distance minimale à la route de transhumance la plus proche :"
 
@@ -2101,7 +2498,10 @@ if pam_distance_field is not None:
     )
 
 
-
+# Commentaire : toujours affiché en dernière ligne du tooltip, sans libellé,
+# afin de laisser toute la largeur disponible aux commentaires longs.
+tooltip_fields.append("Commentaire")
+tooltip_aliases.append("")
 
 
 valid_fields = []
@@ -2152,7 +2552,7 @@ for field, alias in zip(
 
 
 
-folium.GeoJson(
+target_hex_layer = folium.GeoJson(
 
     targetisation,
 
@@ -2181,6 +2581,8 @@ folium.GeoJson(
         labels=True,
 
         localize=True,
+
+        class_name="hex-tooltip",
 
         style=(
 
@@ -2222,7 +2624,7 @@ folium.GeoJson(
 
 folium.LayerControl(
 
-    position="topright",
+    position="topleft",
 
     collapsed=False,
 
@@ -2248,896 +2650,152 @@ folium.LayerControl(
 
 layer_panels = {
 
-
-
-
-
-    # ==================================================
-
-    # TARGETISATION
-
-    # ==================================================
-
-
-
-    "Targetisation": """
-
-    <div class="info-title">
-
-        Targetisation
-
-    </div>
-
-
-
-    <div class="info-text">
-
-
-
-        La zone d'étude est divisée en
-
-        <b>hexagones de 25 km²</b>.
-
-
-
-        <br><br>
-
-
-
-        Le score de ciblage combine deux dimensions :
-
-
-
-        <ul>
-
-
-
-            <li>
-
-                la population estimée dans chaque hexagone,
-
-                classée en <b>3 catégories</b>.
-
-                En l'absence de population, la classe de
-
-                population prend la valeur <b>0</b> ;
-
-            </li>
-
-
-
-            <li>
-
-                la proportion de la superficie de l'hexagone
-
-                correspondant à du rangeland présentant un
-
-                potentiel de restauration, classée en
-
-                <b>4 catégories</b>.
-
-            </li>
-
-
-
-        </ul>
-
-
-
-        <b>
-
-            target_score =
-
-            classe population +
-
-            classe potentiel de restauration
-
-        </b>
-
-
-
-        <br><br>
-
-
-
-        Le score varie de
-
-        <b>1 à 7</b>.
-
-
-
-        Un score élevé correspond à un hexagone combinant
-
-        une population relativement élevée et une proportion
-
-        importante de rangeland présentant un potentiel
-
-        de restauration.
-
-
-
-        <br><br>
-
-
-
-        Deux indicateurs de distance sont également présentés
-
-        comme informations complémentaires :
-
-        la distance minimale à la route de transhumance
-
-        la plus proche et la distance minimale au
-
-        site d'intervention PAM le plus proche.
-
-
-
-        <br><br>
-
-
-
-        Ces distances sont exprimées en
-
-        <b>kilomètres</b> et sont calculées
-
-        <b>à partir du centroïde de chaque hexagone</b>.
-
-
-
-        Elles ne sont pas intégrées au score de ciblage.
-
-
-
-    </div>
-
-
-
-
-
-    <div class="info-legend-title">
-
-        Score de ciblage
-
-    </div>
-
-
-
-
-
-    <div class="legend-row">
-
-        <span class="square"
-
-              style="background:#FFF7EC;">
-
-        </span>
-
-        1
-
-    </div>
-
-
-
-    <div class="legend-row">
-
-        <span class="square"
-
-              style="background:#FEE8C8;">
-
-        </span>
-
-        2
-
-    </div>
-
-
-
-    <div class="legend-row">
-
-        <span class="square"
-
-              style="background:#FDD49E;">
-
-        </span>
-
-        3
-
-    </div>
-
-
-
-    <div class="legend-row">
-
-        <span class="square"
-
-              style="background:#FDBB84;">
-
-        </span>
-
-        4
-
-    </div>
-
-
-
-    <div class="legend-row">
-
-        <span class="square"
-
-              style="background:#FC8D59;">
-
-        </span>
-
-        5
-
-    </div>
-
-
-
-    <div class="legend-row">
-
-        <span class="square"
-
-              style="background:#E34A33;">
-
-        </span>
-
-        6
-
-    </div>
-
-
-
-    <div class="legend-row">
-
-        <span class="square"
-
-              style="background:#B30000;">
-
-        </span>
-
-        7
-
-    </div>
-
-    """,
-
-
-
-
-
-    # ==================================================
-
-    # POPULATION
-
-    # ==================================================
-
-
-
-    "Population": """
-
-    <div class="info-title">
-
-        Population
-
-    </div>
-
-
-
-    <div class="info-text">
-
-
-
-        Cette couche représente la distribution spatiale
-
-        de la population estimée dans la zone d'étude.
-
-
-
-        <br><br>
-
-
-
-        La valeur de chaque pixel du raster correspond au
-
-        <b>nombre estimé d'habitants présents dans ce pixel</b>.
-
-
-
-        <br><br>
-
-
-
-        <span class="source-text">
-
-            Source : <b>WorldPop, 2026</b>.
-
-        </span>
-
-
-
-    </div>
-
-
-
-
-
-    <div class="info-legend-title">
-
-        Population par pixel
-
-    </div>
-
-
-
-
-
-    <div class="population-gradient">
-
-    </div>
-
-
-
-
-
-    <div class="gradient-labels">
-
-
-
-        <span>
-
-            Faible
-
-        </span>
-
-
-
-        <span>
-
-            Élevée
-
-        </span>
-
-
-
-    </div>
-
-    """,
-
-
-
-
-
-    # ==================================================
-
-    # POTENTIEL DE RESTAURATION
-
-    # ==================================================
-
-
-
-    "Potentiel de restauration": """
-
-    <div class="info-title">
-
-        Potentiel de restauration
-
-    </div>
-
-
-
-    <div class="info-text">
-
-
-
-        Cette couche identifie les zones de
-
-        <b>rangeland présentant un potentiel de restauration</b>
-
-        à partir d'un screening combinant plusieurs indicateurs
-
-        environnementaux et pastoraux.
-
-
-
-        <br><br>
-
-
-
-        L'analyse se concentre notamment sur les zones de
-
-        rangeland persistantes présentant des signes de
-
-        dégradation et prend en compte des informations relatives :
-
-
-
-        <ul>
-
-
-
-            <li>
-
-                au stress de la végétation ;
-
-            </li>
-
-
-
-            <li>
-
-                aux déficits saisonniers de précipitations ;
-
-            </li>
-
-
-
-            <li>
-
-                à la présence et à l'intensité du cheptel ;
-
-            </li>
-
-
-
-            <li>
-
-                à l'exposition au risque d'inondation.
-
-            </li>
-
-
-
-        </ul>
-
-
-
-        Deux niveaux de sélection sont représentés :
-
-        <b>Moderate</b>, correspondant à un screening plus
-
-        inclusif, et <b>Conservative</b>, basé sur des critères
-
-        plus stricts.
-
-
-
-        <br><br>
-
-
-
-        Cette couche constitue un
-
-        <b>outil de screening spatial</b> permettant
-
-        d'identifier des zones potentielles à approfondir.
-
-
-
-    </div>
-
-
-
-
-
-    <div class="info-legend-title">
-
-        Potentiel de restauration
-
-    </div>
-
-
-
-
-
-    <div class="legend-row">
-
-
-
-        <span class="square"
-
-              style="background:#2B6CB0;">
-
-        </span>
-
-
-
-        Moderate
-
-
-
-    </div>
-
-
-
-
-
-    <div class="legend-row">
-
-
-
-        <span class="square"
-
-              style="background:#08306B;">
-
-        </span>
-
-
-
-        Conservative
-
-
-
-    </div>
-
-    """,
-
-
-
-
-
-    # ==================================================
-
-    # AOI
-
-    # ==================================================
-
-
-
     "Zone d'étude": """
-
-    <div class="info-title">
-
-        Zone d'étude
-
-    </div>
-
-
-
+    <div class="info-title">Zone d'étude</div>
     <div class="info-text">
-
-
-
-        La zone d'étude couvre les provinces du
-
-        <b>Sila</b>,
-
-        <b>Ouaddaï</b>,
-
-        <b>Salamat</b> et
-
-        <b>Moyen-Chari</b>.
-
-
-
+        La zone d'étude couvre le <b>Sila, le Ouaddaï, le Salamat et le Moyen-Chari</b>.
+        Les aires protégées et les zones situées à moins de <b>30 km des frontières
+        avec le Soudan et la République centrafricaine</b> sont exclues du périmètre d'analyse.
         <br><br>
-
-
-
-        Les aires protégées ainsi que les zones situées
-
-        à moins de <b>30 km des frontières internationales
-
-        avec le Soudan et la République centrafricaine</b>
-
-        sont exclues.
-
-
-
-        <br><br>
-
-
-
-        <span class="source-text">
-
-
-
-            Aires protégées :
-
-            <a
-
-                href="https://www.protectedplanet.net/country/TCD"
-
-                target="_blank"
-
-            >
-
-                Protected Planet – Tchad
-
-            </a>
-
-
-
-        </span>
-
-
-
+        <span class="source-text">Aires protégées : Protected Planet – Tchad.</span>
     </div>
-
-
-
-
-
-    <div class="info-legend-title">
-
-        Limite
-
-    </div>
-
-
-
-
-
+    <div class="info-legend-title">Limite</div>
     <div class="legend-row">
-
-
-
-        <span class="line-symbol"
-
-              style="border-color:#58595a;">
-
-        </span>
-
-
-
+        <span class="line-symbol" style="border-color:#58595a;"></span>
         Zone d'étude
-
-
-
     </div>
-
+    <div class="methodological-note-footer">
+        <b>Référence méthodologique :</b> Annexe 3 – Étape 2, « Délimitation de la zone d'étude ».
+        Voir la note méthodologique téléchargeable dans ce panneau.
+    </div>
     """,
 
+    "Couverture du sol (2021)": """
+    <div class="info-title">Couverture du sol (2021)</div>
+    <div class="info-legend-title" style="margin-top:0; padding-top:0; border-top:none;">Légende</div>
+    <div class="legend-row"><span class="square" style="background:#006400;"></span>Couvert arboré</div>
+    <div class="legend-row"><span class="square" style="background:#FFBB22;"></span>Arbustes</div>
+    <div class="legend-row"><span class="square" style="background:#FFFF4C;"></span>Prairies / formations herbacées</div>
+    <div class="legend-row"><span class="square" style="background:#F096FF;"></span>Terres cultivées</div>
+    <div class="legend-row"><span class="square" style="background:#FA0000;"></span>Zones bâties</div>
+    <div class="legend-row"><span class="square" style="background:#B4B4B4;"></span>Sol nu / végétation clairsemée</div>
+    <div class="legend-row"><span class="square" style="background:#F0F0F0;"></span>Neige et glace</div>
+    <div class="legend-row"><span class="square" style="background:#0064C8;"></span>Plans d'eau permanents</div>
+    <div class="legend-row"><span class="square" style="background:#0096A0;"></span>Zones humides herbacées</div>
+    <div class="legend-row"><span class="square" style="background:#00CF75;"></span>Mangroves</div>
+    <div class="legend-row"><span class="square" style="background:#FAE6A0;"></span>Mousses et lichens</div>
+    <div class="info-text" style="margin-top:10px;">
+        La <b>couverture du sol</b> décrit ce qui est physiquement observable à la surface terrestre.
+        ESA WorldCover 2021 fournit ici un fond de contexte à <b>10 m</b>.
+        Il ne remplace pas le proxy Global Pasture Watch utilisé pour identifier les parcours pastoraux.
+        <br><br>
+        <span class="source-text">Source : ESA WorldCover 2021 v2.</span>
+    </div>
+    <div class="methodological-note-footer">
+        <b>Référence méthodologique :</b> Annexe 3 – Étape 1, « Cadre conceptuel : couverture du sol,
+        utilisation du sol et parcours pastoraux », puis Étape 3 pour le proxy GPW.
+    </div>
+    """,
 
+    "Parcours pastoraux présentant un potentiel de restauration": """
+    <div class="info-title">Parcours pastoraux présentant un potentiel de restauration</div>
+    <div class="info-text">
+        Cette couche correspond au résultat du <b>screening biophysique</b> : un proxy des parcours
+        pastoraux est croisé avec les signes de dégradation, puis avec des indicateurs complémentaires
+        de stress, de pression et de contrainte environnementale.
+        <br><br>
+        Deux scénarios sont représentés : <b>Moderate</b> et <b>Conservative</b>.
+    </div>
+    <div class="info-legend-title">Potentiel de restauration</div>
+    <div class="legend-row"><span class="square" style="background:#2B6CB0;"></span>Moderate</div>
+    <div class="legend-row"><span class="square" style="background:#08306B;"></span>Conservative</div>
+    <div class="methodological-note-footer">
+        <b>Référence méthodologique :</b> Annexe 3 – Étapes 3 à 6, « Screening biophysique ».
+        Les indicateurs, seuils et règles des deux scénarios sont détaillés dans la note.
+    </div>
+    """,
 
-
-
-    # ==================================================
-
-    # TRANSHUMANCE
-
-    # ==================================================
-
-
+    "Population estimée (2026)": """
+    <div class="info-title">Population estimée (2026)</div>
+    <div class="info-text">
+        Cette couche représente la distribution spatiale de la <b>population estimée</b> dans la zone d'étude.
+        Elle est mobilisée dans la phase de ciblage opérationnel pour mettre en relation le potentiel de
+        restauration avec la présence de population.
+        <br><br>
+        <span class="source-text">Source : WorldPop, 2026.</span>
+    </div>
+    <div class="info-legend-title">Population par pixel</div>
+    <div class="population-gradient"></div>
+    <div class="gradient-labels"><span>Faible</span><span>Élevée</span></div>
+    <div class="methodological-note-footer">
+        <b>Référence méthodologique :</b> Annexe 3 – Étape 7, « Intégration de la densité de population ».
+    </div>
+    """,
 
     "Routes de transhumance": """
-
-    <div class="info-title">
-
-        Routes de transhumance
-
-    </div>
-
-
-
+    <div class="info-title">Routes de transhumance</div>
     <div class="info-text">
-
-
-
-        Cette couche représente les principaux
-
-        <b>axes de transhumance</b> utilisés dans l'analyse.
-
-
-
+        Cette couche représente les principaux <b>axes de transhumance</b> utilisés comme information
+        complémentaire de ciblage. Pour chaque hexagone, le dashboard indique la distance à l'axe le plus proche.
         <br><br>
-
-
-
-        Les itinéraires ont été digitalisés à partir
-
-        des informations cartographiques présentées dans
-
-        un rapport du
-
-        <b>Transhumance Tracking Tool (TTT) de l'OIM-DTM</b>.
-
-
-
-        <br><br>
-
-
-
-        Pour chaque hexagone, la
-
-        <b>distance minimale entre son centroïde
-
-        et la route de transhumance la plus proche</b>
-
-        est calculée.
-
-
-
-        La distance est exprimée en
-
-        <b>kilomètres</b> et constitue une information
-
-        complémentaire pour la priorisation.
-
-
-
-        <br><br>
-
-
-
-        <span class="source-text">
-
-
-
-            Source :
-
-            <a
-
-                href="https://dtm.iom.int/dtm_download_track/29721?file=1&type=node&id=22076"
-
-                target="_blank"
-
-            >
-
-                OIM-DTM – Transhumance Tracking Tool (TTT)
-
-            </a>
-
-
-
-        </span>
-
-
-
+        <span class="source-text">Source : OIM-DTM – Transhumance Tracking Tool (TTT).</span>
     </div>
-
-
-
-
-
-    <div class="info-legend-title">
-
-        Route
-
+    <div class="info-legend-title">Route</div>
+    <div class="legend-row"><span class="line-symbol" style="border-color:#E67E22;"></span>Route de transhumance</div>
+    <div class="methodological-note-footer">
+        <b>Référence méthodologique :</b> Annexe 3 – Étape 8, « Données de transhumance et des interventions du PAM ».
     </div>
-
-
-
-
-
-    <div class="legend-row">
-
-
-
-        <span class="line-symbol"
-
-              style="border-color:#E67E22;">
-
-        </span>
-
-
-
-        Route de transhumance
-
-
-
-    </div>
-
     """,
 
-
-
-
-
-    # ==================================================
-
-    # SITES PAM
-
-    # ==================================================
-
-
-
-    "Sites PAM": """
-
-    <div class="info-title">
-
-        Sites PAM
-
-    </div>
-
-
-
+    "Sites d’intervention du PAM": """
+    <div class="info-title">Sites d’intervention du PAM</div>
     <div class="info-text">
-
-
-
-        Cette couche représente les
-
-        <b>sites d'intervention du Programme alimentaire mondial
-
-        (PAM)</b> considérés dans l'analyse.
-
-
-
+        Cette couche représente les <b>sites d'intervention du PAM</b> considérés dans l'analyse.
+        Pour chaque hexagone, le dashboard indique la distance au site le plus proche comme information
+        complémentaire au ciblage.
         <br><br>
+        <span class="source-text">Source : Programme alimentaire mondial (PAM).</span>
+    </div>
+    <div class="info-legend-title">Site</div>
+    <div class="legend-row"><span class="point-symbol"></span>Site d'intervention PAM</div>
+    <div class="methodological-note-footer">
+        <b>Référence méthodologique :</b> Annexe 3 – Étape 8, « Données de transhumance et des interventions du PAM ».
+    </div>
+    """,
 
-
-
-        Pour chaque hexagone, la
-
-        <b>distance minimale entre son centroïde
-
-        et le site d'intervention PAM le plus proche</b>
-
-        est calculée.
-
-
-
-        La distance est exprimée en
-
-        <b>kilomètres</b> et constitue une information
-
-        complémentaire pour la priorisation.
-
-
-
+    "Score final de ciblage": """
+    <div class="info-title">Score final de ciblage</div>
+    <div class="info-text">
+        Les résultats sont agrégés dans une grille d’<b>hexagones de 25 km²</b>. Le score combine la population estimée
+        (<b>3 classes</b>) et la proportion de superficie présentant un potentiel de restauration (<b>4 classes</b>).
+        Il varie de <b>1 à 7</b> :
+        plus le score est élevé, plus ces deux dimensions sont importantes relativement au reste de la zone d'étude.
         <br><br>
-
-
-
-        <span class="source-text">
-
-
-
-            Source :
-
-            <a
-
-                href="https://www.arcgis.com/apps/dashboards/0de08bf90dd74c5396da4d4d406c13d2#."
-
-                target="_blank"
-
-            >
-
-                Tableau de bord PAM
-
-            </a>
-
-
-
-        </span>
-
-
-
+        Les distances aux routes de transhumance et aux sites du PAM sont affichées comme informations
+        complémentaires et <b>ne sont pas intégrées au score</b>.
     </div>
-
-
-
-
-
-    <div class="info-legend-title">
-
-        Site
-
+    <div class="info-legend-title">Score de ciblage</div>
+    <div class="score-legend-compact">
+        <span class="score-legend-item"><span class="square" style="background:#FFF7EC;"></span>1</span>
+        <span class="score-legend-item"><span class="square" style="background:#FEE8C8;"></span>2</span>
+        <span class="score-legend-item"><span class="square" style="background:#FDD49E;"></span>3</span>
+        <span class="score-legend-item"><span class="square" style="background:#FDBB84;"></span>4</span>
+        <span class="score-legend-item"><span class="square" style="background:#FC8D59;"></span>5</span>
+        <span class="score-legend-item"><span class="square" style="background:#E34A33;"></span>6</span>
+        <span class="score-legend-item"><span class="square" style="background:#B30000;"></span>7</span>
     </div>
-
-
-
-
-
-    <div class="legend-row">
-
-
-
-        <span class="point-symbol">
-
-        </span>
-
-
-
-        Site d'intervention PAM
-
-
-
+    <div class="methodological-note-footer">
+        <b>Référence méthodologique :</b> Annexe 3 – Étape 9, « Construction du score final de ciblage ».
+        L'utilisation de ce score dans le dashboard est décrite à l'Étape 10.
     </div>
-
     """
+}
 
+
+
+layer_panels = {
+    layer_name: layer_html
+    for layer_name, layer_html in layer_panels.items()
 }
 
 
@@ -3168,7 +2826,7 @@ class LayerInfoControl(
 
         layers,
 
-        initial_layer="Targetisation"
+        initial_layer="Score final de ciblage"
 
     ):
 
@@ -3209,6 +2867,14 @@ class LayerInfoControl(
         )
 
 
+
+        self.methodology_url = json.dumps(
+
+            ANNEX_PDF_DATA_URL,
+
+            ensure_ascii=False
+
+        )
 
 
 
@@ -3350,6 +3016,10 @@ class LayerInfoControl(
 
                     250px;
 
+                overflow:
+
+                    visible;
+
 
 
             }
@@ -3380,11 +3050,221 @@ class LayerInfoControl(
 
                     #58595a;
 
+                position:
 
+                    relative;
+
+                display:
+
+                    flex;
+
+                align-items:
+
+                    center;
+
+                gap:
+
+                    6px;
 
             }
 
 
+
+            .layer-info-trigger {
+
+                position:
+
+                    relative;
+
+                z-index:
+
+                    2;
+
+                width:
+
+                    16px;
+
+                height:
+
+                    16px;
+
+                border:
+
+                    none;
+
+                border-radius:
+
+                    50%;
+
+                background:
+
+                    #005A9C;
+
+                color:
+
+                    white;
+
+                font-size:
+
+                    10px;
+
+                line-height:
+
+                    1;
+
+                font-weight:
+
+                    700;
+
+                cursor:
+
+                    pointer;
+
+                display:
+
+                    inline-flex;
+
+                align-items:
+
+                    center;
+
+                justify-content:
+
+                    center;
+
+                padding:
+
+                    0;
+
+                margin-left:
+
+                    auto;
+
+                box-shadow:
+
+                    0 1px 3px rgba(0,0,0,0.18);
+
+            }
+
+
+
+
+
+            .layer-info-trigger:hover {
+
+                background:
+
+                    #003F73;
+
+            }
+
+
+
+            .layer-info-popover {
+
+                position:
+
+                    fixed;
+
+                width:
+
+                    min(360px, calc(100vw - 32px));
+
+                max-height:
+
+                    none;
+
+                overflow:
+
+                    visible;
+
+                background:
+
+                    rgba(255,255,255,0.98);
+
+                border:
+
+                    1px solid #d9d9d9;
+
+                border-left:
+
+                    4px solid #005A9C;
+
+                border-radius:
+
+                    7px;
+
+                box-shadow:
+
+                    0 3px 12px rgba(0,0,0,0.2);
+
+                padding:
+
+                    10px 12px;
+
+                z-index:
+
+                    2000;
+
+                display:
+
+                    none;
+
+                color:
+
+                    #58595a;
+
+                font-size:
+
+                    12px;
+
+                line-height:
+
+                    1.4;
+
+                pointer-events:
+
+                    auto;
+
+                box-sizing:
+
+                    border-box;
+
+            }
+
+
+
+            .layer-info-popover.visible {
+
+                display:
+
+                    block;
+
+            }
+
+
+
+            .layer-info-popover .info-title {
+
+                font-size:
+
+                    14px;
+
+                margin-bottom:
+
+                    6px;
+
+            }
+
+
+
+            .layer-info-popover .info-text {
+
+                font-size:
+
+                    12px;
+
+            }
 
 
 
@@ -3506,13 +3386,13 @@ class LayerInfoControl(
 
                 max-height:
 
-                    52vh;
+                    none;
 
 
 
-                overflow-y:
+                overflow:
 
-                    auto;
+                    visible;
 
 
 
@@ -3710,6 +3590,104 @@ class LayerInfoControl(
 
 
 
+            #methodological-note-control-footer {
+
+                margin-top:
+
+                    12px;
+
+                padding-top:
+
+                    10px;
+
+                border-top:
+
+                    1px solid #d9d9d9;
+
+                font-size:
+
+                    12px;
+
+                font-weight:
+
+                    700;
+
+            }
+
+
+
+            #methodological-note-control-footer a {
+
+                color:
+
+                    #005A9C;
+
+                text-decoration:
+
+                    none;
+
+            }
+
+
+
+            #methodological-note-control-footer a:hover {
+
+                text-decoration:
+
+                    underline;
+
+            }
+
+
+
+            .methodological-note-footer {
+
+                margin-top:
+
+                    14px;
+
+                padding-top:
+
+                    10px;
+
+                border-top:
+
+                    1px solid #e4e4e4;
+
+                font-size:
+
+                    12px;
+
+                font-weight:
+
+                    700;
+
+            }
+
+
+
+            .methodological-note-footer a {
+
+                color:
+
+                    #005A9C;
+
+                text-decoration:
+
+                    none;
+
+            }
+
+
+
+            .methodological-note-footer a:hover {
+
+                text-decoration:
+
+                    underline;
+
+            }
+
 
 
             .info-legend-title {
@@ -3756,6 +3734,31 @@ class LayerInfoControl(
 
 
 
+
+
+            .score-legend-compact {
+                display: flex;
+                align-items: center;
+                gap: 7px;
+                flex-wrap: nowrap;
+                margin-top: 3px;
+                margin-bottom: 2px;
+            }
+
+            .score-legend-item {
+                display: inline-flex;
+                align-items: center;
+                gap: 3px;
+                font-size: 11px;
+                white-space: nowrap;
+            }
+
+            .score-legend-compact .square {
+                width: 11px;
+                height: 11px;
+                flex: 0 0 11px;
+                margin-right: 0;
+            }
 
 
             .legend-row {
@@ -4026,6 +4029,10 @@ class LayerInfoControl(
 
                 {{ this._parent.get_name() }};
 
+            if (mapObject.zoomControl) {
+                mapObject.zoomControl.setPosition("topright");
+            }
+
 
 
 
@@ -4062,7 +4069,7 @@ class LayerInfoControl(
 
                     position:
 
-                        "bottomright"
+                        "bottomleft"
 
 
 
@@ -4102,15 +4109,11 @@ class LayerInfoControl(
 
                     div.innerHTML =
 
-                        layerPanels[
+                        "";
 
-                            initialLayer
+                    div.style.display =
 
-                        ];
-
-
-
-
+                        "none";
 
                     L.DomEvent
 
@@ -4225,7 +4228,6 @@ class LayerInfoControl(
                     document.getElementById(
 
                         "layer-info-box"
-
                     );
 
 
@@ -4251,7 +4253,6 @@ class LayerInfoControl(
                     layerPanels[
 
                         layerName
-
                     ]
 
                 ) {
@@ -4263,17 +4264,13 @@ class LayerInfoControl(
                         layerPanels[
 
                             layerName
-
                         ];
-
-
 
 
 
                     box.style.display =
 
                         "block";
-
 
 
                 }
@@ -4289,7 +4286,6 @@ class LayerInfoControl(
                         "none";
 
 
-
                 }
 
 
@@ -4298,8 +4294,298 @@ class LayerInfoControl(
 
 
 
+            function closeLayerInfoPopovers() {
+
+                document.querySelectorAll(
+
+                    ".layer-info-popover"
+                ).forEach(
+
+                    function(popover) {
+
+                        popover.classList.remove(
+
+                            "visible"
+                        );
+
+                    }
+                );
+
+            }
 
 
+
+            function normalizeLayerLabelText(labelText) {
+                const rawText =
+                    (labelText || "").replace(/\s+/g, " ").trim();
+                if (!rawText) {
+                    return "";
+                }
+                return rawText
+                    .replace(/\s*i\s*$/i, "")
+                    .replace(/\s+/g, " ")
+                    .trim();
+            }
+
+            function resolveLayerKey(labelText) {
+
+                const rawText = normalizeLayerLabelText(labelText);
+
+                if (!rawText) {
+                    return null;
+                }
+
+                if (layerPanels[rawText]) {
+                    return rawText;
+                }
+
+                const normalized = rawText.toLowerCase();
+                const lowercaseMatch = Object.keys(layerPanels).find(function(key) {
+                    return key.toLowerCase() === normalized;
+                });
+
+                if (lowercaseMatch) {
+                    return lowercaseMatch;
+                }
+
+                const flatText = rawText.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+                const accentMatch = Object.keys(layerPanels).find(function(key) {
+                    return key.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase() === flatText;
+                });
+
+                return accentMatch || null;
+            }
+
+            function attachLayerInfoTriggers() {
+
+                const labels =
+
+                    document.querySelectorAll(
+
+                        ".leaflet-control-layers-base label, .leaflet-control-layers-overlays label"
+                    );
+
+
+
+                labels.forEach(
+
+                    function(label) {
+
+                        if (label.dataset.layerInfoBound === "true") {
+                            return;
+                        }
+
+                        const layerName =
+
+                            resolveLayerKey(label.textContent);
+
+
+                        if (!layerName || !layerPanels[layerName]) {
+
+                            return;
+
+                        }
+
+                        label.dataset.layerInfoBound = "true";
+                        label.style.position = "relative";
+
+                        const trigger =
+
+                            document.createElement(
+
+                                "button"
+                            );
+
+
+
+                        trigger.type = "button";
+
+                        trigger.className = "layer-info-trigger";
+
+                        trigger.innerHTML = "i";
+
+                        trigger.title = "Description";
+
+                        trigger.setAttribute(
+
+                            "aria-label",
+
+                            `Afficher la description de ${layerName}`
+                        );
+
+
+
+                        trigger.addEventListener(
+
+                            "pointerdown",
+
+                            function(event) {
+
+                                event.preventDefault();
+
+                                event.stopPropagation();
+
+                            },
+
+                            true
+                        );
+
+
+
+                        trigger.addEventListener(
+
+                            "click",
+
+                            function(event) {
+
+                                event.preventDefault();
+
+                                event.stopPropagation();
+
+                                event.stopImmediatePropagation();
+
+                                let popover =
+
+                                    document.getElementById(
+
+                                        "layer-info-floating-popover"
+
+                                    );
+
+                                if (!popover) {
+
+                                    popover = document.createElement("div");
+
+                                    popover.id = "layer-info-floating-popover";
+
+                                    popover.className = "layer-info-popover";
+
+                                    popover.addEventListener("click", function(popoverEvent) {
+
+                                        popoverEvent.stopPropagation();
+
+                                    });
+
+                                    document.body.appendChild(popover);
+
+                                }
+
+                                const isVisible =
+
+                                    popover.classList.contains("visible")
+
+                                    && popover.dataset.layerName === layerName;
+
+                                closeLayerInfoPopovers();
+
+                                if (!isVisible) {
+
+                                    popover.innerHTML = layerPanels[layerName];
+
+                                    popover.dataset.layerName = layerName;
+
+                                    popover.classList.add("visible");
+
+                                    const triggerRect = trigger.getBoundingClientRect();
+
+                                    const margin = 8;
+
+                                    popover.style.left = (triggerRect.right + margin) + "px";
+
+                                    popover.style.top = triggerRect.top + "px";
+
+                                    requestAnimationFrame(function() {
+
+                                        const popupRect = popover.getBoundingClientRect();
+
+                                        let left = triggerRect.right + margin;
+
+                                        let top = triggerRect.top;
+
+                                        if (left + popupRect.width > window.innerWidth - margin) {
+
+                                            left = triggerRect.left - popupRect.width - margin;
+
+                                        }
+
+                                        if (top + popupRect.height > window.innerHeight - margin) {
+
+                                            top = window.innerHeight - popupRect.height - margin;
+
+                                        }
+
+                                        popover.style.left = Math.max(margin, left) + "px";
+
+                                        popover.style.top = Math.max(margin, top) + "px";
+
+                                    });
+
+                                    const box = document.getElementById("layer-info-box");
+
+                                    if (box) {
+
+                                        box.style.display = "none";
+
+                                    }
+
+                                }
+
+                            }
+                        );
+
+
+
+                        label.appendChild(trigger);
+
+                    }
+                );
+
+            }
+
+
+
+            document.addEventListener(
+
+                "click",
+
+                function(event) {
+
+                    const clickedTrigger =
+
+                        event.target.closest(
+
+                            ".layer-info-trigger"
+                        );
+
+                    const clickedPopover =
+
+                        event.target.closest(
+
+                            ".layer-info-popover"
+                        );
+
+
+
+                    if (!clickedTrigger && !clickedPopover) {
+                        closeLayerInfoPopovers();
+                    }
+
+                }
+            );
+
+            const layerListObserver = new MutationObserver(function() {
+                attachLayerInfoTriggers();
+            });
+
+            const layerListNode = document.querySelector(".leaflet-control-layers-list");
+            if (layerListNode) {
+                layerListObserver.observe(layerListNode, {
+                    childList: true,
+                    subtree: true,
+                    attributes: true,
+                    attributeFilter: ["class", "style"]
+                });
+            }
             /* =====================================
 
                OVERLAY ADD
@@ -4369,17 +4655,14 @@ class LayerInfoControl(
                     activeLayerOrder.push(
 
                         layerName
-
                     );
-
 
 
 
 
                     showPanel(
 
-                        layerName
-
+                        null
                     );
 
 
@@ -4468,25 +4751,10 @@ class LayerInfoControl(
 
 
 
-                        const lastLayer =
-
-                            activeLayerOrder[
-
-                                activeLayerOrder.length
-
-                                - 1
-
-                            ];
-
-
-
-
-
                         showPanel(
 
-                            lastLayer
-
-                        );
+                        null
+                    );
 
 
 
@@ -4555,8 +4823,19 @@ class LayerInfoControl(
                         );
 
 
+                    const bases =
+
+                        document.querySelector(
+
+                            ".leaflet-control-layers-base"
+
+                        );
 
 
+
+
+
+                    attachLayerInfoTriggers();
 
                     if (
 
@@ -4596,7 +4875,7 @@ class LayerInfoControl(
 
                         mapTitle.innerHTML =
 
-                            "Ciblage des zones à potentiel de restauration – SCALE - GCF";
+                            "Ciblage des parcours pastoraux présentant un potentiel de restauration – SCALE - GCF";
 
 
 
@@ -4654,6 +4933,78 @@ class LayerInfoControl(
 
 
 
+                    if (
+
+                        list
+
+                        &&
+
+                        !document.getElementById(
+
+                            "methodological-note-control-footer"
+
+                        )
+
+                    ) {
+
+                        const methodologicalFooter =
+
+                            document.createElement(
+
+                                "div"
+
+                            );
+
+
+
+                        methodologicalFooter.id =
+
+                            "methodological-note-control-footer";
+
+
+
+                        methodologicalFooter.innerHTML =
+
+                            '<a href="' + {{ this.methodology_url }} + '" download="Annex.pdf" target="_blank" rel="noopener noreferrer">Télécharger la note méthodologique (Annexe 3)</a>';
+
+
+
+                        list.appendChild(
+
+                            methodologicalFooter
+
+                        );
+
+                    }
+
+                    if (bases) {
+
+                        const baseLabels = Array.from(bases.querySelectorAll("label"));
+                        const desiredBaseOrder = [
+                            "Couverture du sol (2021)",
+                            "OpenStreetMap",
+                            "Imagerie satellite"
+                        ];
+
+                        const normalizedBaseLabels = baseLabels.map(function(item) {
+                            return {item: item, normalized: normalizeLayerLabelText(item.textContent)};
+                        });
+
+                        const orderedBaseLabels = [];
+                        desiredBaseOrder.forEach(function(layerName) {
+                            const match = normalizedBaseLabels.find(function(entry) {
+                                return entry.normalized.toLowerCase() === layerName.toLowerCase();
+                            });
+                            if (match && !orderedBaseLabels.includes(match.item)) {
+                                orderedBaseLabels.push(match.item);
+                            }
+                        });
+                        normalizedBaseLabels
+                            .filter(function(entry) { return !orderedBaseLabels.includes(entry.item); })
+                            .forEach(function(entry) { orderedBaseLabels.push(entry.item); });
+                        orderedBaseLabels.forEach(function(label) { bases.appendChild(label); });
+                    }
+
                     if (overlays) {
 
 
@@ -4676,92 +5027,52 @@ class LayerInfoControl(
 
                         const desiredOrder = [
 
-
-
                             "Zone d'étude",
 
+                            "Parcours pastoraux présentant un potentiel de restauration",
 
-
-                            "Sites PAM",
-
-
+                            "Population estimée (2026)",
 
                             "Routes de transhumance",
 
+                            "Sites d’intervention du PAM",
 
-
-                            "Potentiel de restauration",
-
-
-
-                            "Population",
-
-
-
-                            "Targetisation"
-
-
+                            "Score final de ciblage"
 
                         ];
 
+                        const normalizedLabels = labels.map(function(item) {
+                            return {
+                                item: item,
+                                normalized: normalizeLayerLabelText(item.textContent)
+                            };
+                        });
 
+                        const orderedLabels = [];
 
-
-
-                        desiredOrder.forEach(
-
-                            function(layerName) {
-
-
-
-                                const label =
-
-                                    labels.find(
-
-                                        function(item) {
-
-
-
-                                            return (
-
-                                                item.textContent
-
-                                                .trim()
-
-                                                === layerName
-
-                                            );
-
-
-
-                                        }
-
-                                    );
-
-
-
-
-
-                                if (label) {
-
-
-
-                                    overlays.appendChild(
-
-                                        label
-
-                                    );
-
-
-
-                                }
-
-
-
+                        desiredOrder.forEach(function(layerName) {
+                            const match = normalizedLabels.find(function(entry) {
+                                return entry.normalized.toLowerCase() === layerName.toLowerCase();
+                            });
+                            if (match && !orderedLabels.includes(match.item)) {
+                                orderedLabels.push(match.item);
                             }
+                        });
 
-                        );
+                        normalizedLabels
+                            .filter(function(entry) {
+                                return !orderedLabels.includes(entry.item);
+                            })
+                            .map(function(entry) {
+                                return entry.item;
+                            })
+                            .forEach(function(item) {
+                                orderedLabels.push(item);
+                            });
 
+                        orderedLabels.forEach(function(label) {
+                            overlays.appendChild(label);
+                        });
 
 
                     }
@@ -4792,7 +5103,7 @@ class LayerInfoControl(
 
             showPanel(
 
-                initialLayer
+                null
 
             );
 
@@ -4820,69 +5131,41 @@ class LayerInfoControl(
 
 layer_objects = [
 
-
+    (
+        "Couverture du sol (2021)",
+        worldcover_layer
+    ),
 
     (
-
         "Zone d'étude",
-
         aoi_group
-
     ),
 
-
-
     (
-
-        "Sites PAM",
-
-        sites_group
-
-    ),
-
-
-
-    (
-
-        "Routes de transhumance",
-
-        transhumance_group
-
-    ),
-
-
-
-    (
-
-        "Potentiel de restauration",
-
+        "Parcours pastoraux présentant un potentiel de restauration",
         restoration_group
-
     ),
 
-
-
     (
-
-        "Population",
-
+        "Population estimée (2026)",
         population_group
-
     ),
 
-
+    (
+        "Routes de transhumance",
+        transhumance_group
+    ),
 
     (
+        "Sites d’intervention du PAM",
+        sites_group
+    ),
 
-        "Targetisation",
-
+    (
+        "Score final de ciblage",
         target_group
-
     )
-
 ]
-
-
 
 
 
@@ -4892,7 +5175,7 @@ LayerInfoControl(
 
     layers=layer_objects,
 
-    initial_layer="Targetisation"
+    initial_layer="Score final de ciblage"
 
 ).add_to(
 
@@ -4932,7 +5215,9 @@ m.fit_bounds(
 
         ]
 
-    ]
+    ],
+
+    max_zoom=8
 
 )
 
@@ -4948,12 +5233,142 @@ m.fit_bounds(
 
 
 
-folium_static(
+# Float above the map, opposite the existing bottom-right methodology panel.
+st.markdown("""
+<style>
+.st-key-hex_selection_panel {
+    position: fixed; bottom: 24px; left: 160px; z-index: 1000;
+    width: min(1100px, calc(100vw - 190px)); padding: 8px 10px;
+    background: rgba(255,255,255,0.96); color: #333;
+    border: 1px solid #ddd; border-radius: 8px;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.22); font: 12px Arial, sans-serif;
+}
+.st-key-hex_selection_panel {
+    display: block !important; height: auto !important;
+    max-height: none !important; overflow: visible !important; box-sizing: border-box;
+}
+.st-key-hex_selection_panel > div[data-testid="stVerticalBlock"] {
+    display: flex !important; flex-direction: row !important; align-items: flex-start !important;
+    gap: 10px !important;
+}
+.st-key-hex_selection_panel [data-testid="stHorizontalBlock"] {
+    flex: 1 1 0 !important; min-width: 0 !important;
+    height: auto !important; margin-top: 0 !important;
+    display: flex !important; align-items: flex-start !important;
+}
+.st-key-hex_selection_panel [data-testid="stElementContainer"] {
+    height: auto !important; flex: none !important;
+}
+.st-key-hex_restore_import_block {
+    background: rgba(49, 51, 63, 0.08) !important;
+    border: 1px solid rgba(49, 51, 63, 0.12) !important;
+    border-radius: 0.45rem !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    box-sizing: border-box !important;
+}
+.st-key-hex_restore_import_block [data-testid="stHorizontalBlock"] {
+    gap: 10px !important;
+    align-items: center !important;
+    margin: 0 !important;
+    display: flex !important;
+    width: 100% !important;
+    flex-wrap: nowrap !important;
+}
+.st-key-hex_restore_import_block [data-testid="stHorizontalBlock"] > div {
+    min-width: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+}
+.st-key-hex_restore_import_block [data-testid="stHorizontalBlock"] > div:first-child {
+    flex: 1 1 0 !important;
+    width: auto !important;
+    justify-content: flex-start !important;
+    min-width: 0 !important;
+}
+.st-key-hex_restore_import_block [data-testid="stHorizontalBlock"] > div:last-child {
+    flex: 0 0 180px !important;
+    width: 180px !important;
+    justify-content: flex-end !important;
+}
+.st-key-hex_selection_panel [data-testid="stFileUploader"] {
+    width: 100% !important; max-width: 100% !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+    font-size: 12px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: flex-end !important;
+}
+.st-key-hex_selection_panel [data-testid="stFileUploader"] section {
+    width: 100% !important;
+    max-width: 180px !important;
+    padding: 4px 10px !important;
+    background: rgba(255, 255, 255, 0.75) !important;
+    border: 1px solid rgba(49, 51, 63, 0.12) !important;
+    border-radius: 0.45rem !important;
+    min-height: 30px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-sizing: border-box !important;
+    margin: 0 !important;
+}
+.st-key-hex_selection_panel [data-testid="stFileUploaderFileName"] {
+    display: none !important;
+}
+.st-key-hex_selection_panel [data-testid="stFileUploader"] > div {
+    margin: 0 !important;
+    padding: 0 !important;
+}
+.st-key-hex_selection_panel [data-testid="stFileUploader"] section > div:last-child {
+    display: none !important;
+}
+.st-key-hex_selection_panel .selection-restore-copy {
+    box-sizing: border-box;
+    display: flex !important;
+    align-items: center !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    overflow-wrap: anywhere;
+    padding-right: 2px !important;
+    margin: 0 !important;
+}
+.st-key-hex_selection_panel .hex-selection-totals {
+    display: block; font-size: 12px; line-height: 1.3;
+    padding-top: 0;
+    width: 100%;
+}
+.st-key-hex_selection_panel .hex-selection-totals > div {
+    display: block; height: auto; overflow-wrap: anywhere;
+    margin-bottom: 2px;
+    font-size: 11px;
+}
+.st-key-hex_selection_panel .hex-selection-totals td {
+    font-size: 11.5px; line-height: 1.2;
+}
+.st-key-hex_selection_panel button {
+    font-size: 11px; min-height: 28px; width: 100%;
+    padding: 0.3rem 0.5rem !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
+render_selection_summary(
+    selection_data, targetisation, valid_fields, valid_aliases
+)
+selection_updates = folium.FeatureGroup(control=False)
+HexSelectionStyle(target_hex_layer, st.session_state.selected_hex_ids).add_to(
+    selection_updates
+)
+st_folium(
     m,
-
+    key="hex_selection_map",
     width=2000,
-
-    height=1000
-
+    height=1000,
+    use_container_width=True,
+    returned_objects=["last_active_drawing", "last_object_clicked",
+                      "last_object_clicked_count"],
+    feature_group_to_add=selection_updates,
+    on_change=handle_hex_click,
 )
