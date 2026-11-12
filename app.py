@@ -1486,55 +1486,55 @@ def render_selection_summary(hexagons, detail_data, detail_fields, detail_aliase
             export_fields.insert(score_position, field)
             export_labels[field] = label
             score_position += 1
-    details = detail_data.loc[
-        detail_data["GRID_ID"].isin(st.session_state.selected_hex_ids),
-        export_fields,
-    ].copy()
-    details["Commentaire"] = details["GRID_ID"].map(
-        st.session_state.get("hex_comments", {})
-    ).fillna("")
-    centroid_frame = selected[["GRID_ID"]].copy()
-    centroid_frame["centroid_x"] = selected.geometry.centroid.x
-    centroid_frame["centroid_y"] = selected.geometry.centroid.y
-    details = details.merge(centroid_frame, on="GRID_ID", how="left")
     export_labels = {
         **export_labels,
         "centroid_x": "X du centroïde",
         "centroid_y": "Y du centroïde",
         "Commentaire": "Commentaire",
     }
-    details = details.rename(columns=export_labels)
-    with st.container(key="hex_selection_panel"):
-        import_col, totals_col, actions_col = st.columns([2.0, 3.5, 2])
 
-        with actions_col:
-            clear_col, download_col = st.columns(2)
+    def build_export_table(rows):
+        """Build the same CSV structure for a selection or for all hexagons."""
+        row_ids = rows["GRID_ID"].astype(str)
+        export_df = detail_data.loc[
+            detail_data["GRID_ID"].astype(str).isin(row_ids),
+            export_fields,
+        ].copy()
+        export_df["GRID_ID"] = export_df["GRID_ID"].astype(str)
+        export_df["Commentaire"] = export_df["GRID_ID"].map(
+            st.session_state.get("hex_comments", {})
+        ).fillna("")
+        centroid_frame = rows[["GRID_ID"]].copy()
+        centroid_frame["GRID_ID"] = centroid_frame["GRID_ID"].astype(str)
+        centroid_frame["centroid_x"] = rows.geometry.centroid.x
+        centroid_frame["centroid_y"] = rows.geometry.centroid.y
+        export_df = export_df.merge(centroid_frame, on="GRID_ID", how="left")
+        return export_df.rename(columns=export_labels)
+
+    details = build_export_table(selected)
+    all_details = build_export_table(hexagons)
+    export_date = datetime.now(ZoneInfo("Africa/Ndjamena")).strftime("%Y-%m-%d")
+
+    with st.container(key="hex_selection_panel"):
+        import_col, totals_col, actions_col = st.columns(
+            [2.2, 3.8, 2.5],
+            vertical_alignment="center",
+            gap="medium",
+        )
 
         with import_col:
             with st.container(key="hex_restore_import_block"):
                 import_label_col, import_upload_col = st.columns(
-                    [6.2, 1.0],
-                    vertical_alignment="top",
+                    [1.45, 1.0],
+                    vertical_alignment="center",
                     gap="small",
                 )
 
                 with import_label_col:
                     st.markdown(
                         """
-                        <div class='selection-restore-copy' style='
-                            font-size:10px;
-                            font-weight:400;
-                            color:#666;
-                            white-space:normal;
-                            line-height:1.1;
-                            padding: 0;
-                            margin: 0;
-                            box-sizing: border-box;
-                            min-height: 0;
-                            display: flex;
-                            align-items: center;
-                        '>
-                            Rechargez un CSV une sélection précédente.
+                        <div class='selection-restore-copy'>
+                            <div class='selection-section-title'>Recharger une sélection
                         </div>
                         """,
                         unsafe_allow_html=True,
@@ -1542,9 +1542,11 @@ def render_selection_summary(hexagons, detail_data, detail_fields, detail_aliase
 
                 with import_upload_col:
                     uploaded_selection = st.file_uploader(
-                        "",
+                        "Importer un CSV de sélection",
                         type=["csv"],
                         key="hex_selection_restore_upload",
+                        label_visibility="collapsed",
+                        help="Recharge un CSV exporté depuis ce dashboard afin de restaurer la sélection et les commentaires associés.",
                     )
                     if uploaded_selection is not None:
                         signature = uploaded_file_signature(uploaded_selection)
@@ -1575,19 +1577,19 @@ def render_selection_summary(hexagons, detail_data, detail_fields, detail_aliase
             total_area = selected["hex_area_ha"].sum()
             st.markdown(
                 '<div class="hex-selection-totals">'
-                '<div><strong>Sélection actuelle</strong></div>'
-                '<table style="width:100%; border-collapse:collapse; margin-top:4px; table-layout:fixed; white-space:nowrap;">'
+                '<div class="selection-section-title">Sélection actuelle</div>'
+                '<table>'
                 '<tr>'
-                '<td style="padding:1px 10px 1px 0; width:25%; white-space:nowrap;">Hexagones :</td>'
-                f'<td style="padding:1px 10px 1px 0; width:25%; text-align:right; white-space:nowrap;"><strong>{len(selected):,}</strong></td>'
-                '<td style="padding:1px 10px 1px 0; width:25%; white-space:nowrap;">Surface :</td>'
-                f'<td style="padding:1px 0; width:25%; text-align:right; white-space:nowrap;"><strong>{total_area:,.1f} ha</strong></td>'
+                '<td class="metric-label">Hexagones sélectionnés</td>'
+                f'<td class="metric-value"><strong>{len(selected):,}</strong></td>'
+                '<td class="metric-label">Surface totale</td>'
+                f'<td class="metric-value"><strong>{total_area:,.1f} ha</strong></td>'
                 '</tr>'
                 '<tr>'
-                '<td style="padding:1px 10px 1px 0; width:25%; white-space:nowrap;">Population :</td>'
-                f'<td style="padding:1px 10px 1px 0; width:25%; text-align:right; white-space:nowrap;"><strong>{population:,.0f}</strong></td>'
-                '<td style="padding:1px 10px 1px 0; width:25%; white-space:nowrap;">Potentiel de restauration :</td>'
-                f'<td style="padding:1px 0; width:25%; text-align:right; white-space:nowrap;"><strong>{restoration:,.1f} ha</strong></td>'
+                '<td class="metric-label">Population estimée</td>'
+                f'<td class="metric-value"><strong>{population:,.0f}</strong></td>'
+                '<td class="metric-label">Potentiel de restauration</td>'
+                f'<td class="metric-value"><strong>{restoration:,.1f} ha</strong></td>'
                 '</tr>'
                 '</table>'
                 '</div>',
@@ -1602,23 +1604,45 @@ def render_selection_summary(hexagons, detail_data, detail_fields, detail_aliase
                         f"{name} ({count})" for name, count in missing.items() if count
                     ))
 
-        with clear_col:
-            st.button(
-                "Effacer",
-                on_click=clear_hex_selection,
-                use_container_width=True,
+        with actions_col:
+            st.markdown(
+                "<div class='selection-section-title'>Actions</div>",
+                unsafe_allow_html=True,
+            )
+            clear_col, download_selected_col = st.columns(
+                [1.0, 1.25],
+                vertical_alignment="center",
+                gap="small",
             )
 
-        with download_col:
-            st.download_button(
-                "Télécharger",
-                details.to_csv(index=False)
-                .encode("utf-8-sig"),
-                file_name=f"{datetime.now(ZoneInfo('Africa/Ndjamena')).strftime('%Y-%m-%d')}_selected_hexagons.csv",
-                mime="text/csv",
-                disabled=selected.empty,
-                use_container_width=True,
-            )
+            with clear_col:
+                st.button(
+                    "Effacer la sélection",
+                    on_click=clear_hex_selection,
+                    use_container_width=True,
+                    help="Retire tous les hexagones actuellement sélectionnés sur la carte.",
+                )
+
+            with download_selected_col:
+                st.download_button(
+                    "Télécharger la sélection",
+                    details.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"{export_date}_selected_hexagons.csv",
+                    mime="text/csv",
+                    disabled=selected.empty,
+                    use_container_width=True,
+                    help="Télécharge uniquement les hexagones sélectionnés, avec leurs attributs, centroïdes et commentaires.",
+                )
+
+            with st.container(key="download_all_hexagons_link"):
+                st.download_button(
+                    "Télécharger l’ensemble des hexagones",
+                    all_details.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"{export_date}_all_hexagons.csv",
+                    mime="text/csv",
+                    use_container_width=False,
+                    help="Télécharge tous les hexagones avec les mêmes attributs et les commentaires disponibles.",
+                )
 
 
 # ==================================================
@@ -5256,24 +5280,24 @@ m.fit_bounds(
 st.markdown("""
 <style>
 .st-key-hex_selection_panel {
-    position: fixed; bottom: 24px; left: 160px; z-index: 1000;
-    width: min(1100px, calc(100vw - 190px)); padding: 8px 10px;
-    background: rgba(255,255,255,0.96); color: #333;
-    border: 1px solid #ddd; border-radius: 8px;
-    box-shadow: 0 1px 5px rgba(0,0,0,0.22); font: 12px Arial, sans-serif;
+    position: fixed; bottom: 24px; left: 115px; z-index: 1000;
+    width: min(1320px, calc(100vw - 145px)); padding: 10px 12px;
+    background: rgba(255,255,255,0.97); color: #333;
+    border: 1px solid #d7d7d7; border-radius: 8px;
+    box-shadow: 0 1px 6px rgba(0,0,0,0.22); font: 12px Arial, sans-serif;
 }
 .st-key-hex_selection_panel {
     display: block !important; height: auto !important;
     max-height: none !important; overflow: visible !important; box-sizing: border-box;
 }
 .st-key-hex_selection_panel > div[data-testid="stVerticalBlock"] {
-    display: flex !important; flex-direction: row !important; align-items: flex-start !important;
+    display: flex !important; flex-direction: row !important; align-items: center !important;
     gap: 10px !important;
 }
 .st-key-hex_selection_panel [data-testid="stHorizontalBlock"] {
     flex: 1 1 0 !important; min-width: 0 !important;
     height: auto !important; margin-top: 0 !important;
-    display: flex !important; align-items: flex-start !important;
+    display: flex !important; align-items: center !important;
 }
 .st-key-hex_selection_panel [data-testid="stElementContainer"] {
     height: auto !important; flex: none !important;
@@ -5282,7 +5306,7 @@ st.markdown("""
     background: rgba(49, 51, 63, 0.08) !important;
     border: 1px solid rgba(49, 51, 63, 0.12) !important;
     border-radius: 0.45rem !important;
-    padding: 0 !important;
+    padding: 6px 8px !important;
     margin: 0 !important;
     box-sizing: border-box !important;
 }
@@ -5306,8 +5330,8 @@ st.markdown("""
     min-width: 0 !important;
 }
 .st-key-hex_restore_import_block [data-testid="stHorizontalBlock"] > div:last-child {
-    flex: 0 0 180px !important;
-    width: 180px !important;
+    flex: 0 0 190px !important;
+    width: 190px !important;
     justify-content: flex-end !important;
 }
 .st-key-hex_selection_panel [data-testid="stFileUploader"] {
@@ -5321,7 +5345,7 @@ st.markdown("""
 }
 .st-key-hex_selection_panel [data-testid="stFileUploader"] section {
     width: 100% !important;
-    max-width: 180px !important;
+    max-width: 190px !important;
     padding: 4px 10px !important;
     background: rgba(255, 255, 255, 0.75) !important;
     border: 1px solid rgba(49, 51, 63, 0.12) !important;
@@ -5345,30 +5369,88 @@ st.markdown("""
 }
 .st-key-hex_selection_panel .selection-restore-copy {
     box-sizing: border-box;
-    display: flex !important;
-    align-items: center !important;
+    display: block !important;
     width: 100% !important;
     max-width: 100% !important;
-    overflow-wrap: anywhere;
-    padding-right: 2px !important;
+    padding: 0 4px 0 0 !important;
     margin: 0 !important;
 }
-.st-key-hex_selection_panel .hex-selection-totals {
-    display: block; font-size: 12px; line-height: 1.3;
-    padding-top: 0;
-    width: 100%;
-}
-.st-key-hex_selection_panel .hex-selection-totals > div {
-    display: block; height: auto; overflow-wrap: anywhere;
-    margin-bottom: 2px;
+.st-key-hex_selection_panel .selection-section-title {
     font-size: 11px;
+    font-weight: 700;
+    color: #444;
+    line-height: 1.2;
+    margin: 0 0 3px 0;
+}
+.st-key-hex_selection_panel .selection-help-text {
+    font-size: 10.5px;
+    font-weight: 400;
+    color: #6a6a6a;
+    line-height: 1.25;
+    white-space: normal;
+}
+
+.st-key-download_all_hexagons_link {
+    margin-top: 3px !important;
+    text-align: center !important;
+}
+.st-key-download_all_hexagons_link [data-testid="stDownloadButton"] {
+    display: flex !important;
+    justify-content: center !important;
+}
+.st-key-download_all_hexagons_link [data-testid="stDownloadButton"] button {
+    min-height: auto !important;
+    height: auto !important;
+    width: auto !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    color: #005A9C !important;
+    font-size: 10.5px !important;
+    font-weight: 400 !important;
+    text-decoration: underline !important;
+}
+.st-key-download_all_hexagons_link [data-testid="stDownloadButton"] button:hover {
+    color: #003F73 !important;
+    background: transparent !important;
+    border: none !important;
+}
+.st-key-hex_selection_panel .hex-selection-totals {
+    display: block;
+    width: 100%;
+    font-size: 11.5px;
+    line-height: 1.25;
+}
+.st-key-hex_selection_panel .hex-selection-totals table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    margin-top: 2px;
 }
 .st-key-hex_selection_panel .hex-selection-totals td {
-    font-size: 11.5px; line-height: 1.2;
+    padding: 2px 6px 2px 0;
+    vertical-align: middle;
+}
+.st-key-hex_selection_panel .hex-selection-totals .metric-label {
+    width: 30%;
+    color: #555;
+    white-space: normal;
+}
+.st-key-hex_selection_panel .hex-selection-totals .metric-value {
+    width: 20%;
+    text-align: right;
+    white-space: nowrap;
+    padding-right: 12px;
 }
 .st-key-hex_selection_panel button {
-    font-size: 11px; min-height: 28px; width: 100%;
-    padding: 0.3rem 0.5rem !important;
+    font-size: 10.5px;
+    min-height: 36px;
+    width: 100%;
+    padding: 0.3rem 0.45rem !important;
+    white-space: normal !important;
+    line-height: 1.15 !important;
 }
 </style>
 """, unsafe_allow_html=True)
