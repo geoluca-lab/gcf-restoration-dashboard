@@ -17,6 +17,7 @@ import numpy as np
 
 import json
 from datetime import datetime
+from io import BytesIO
 from zoneinfo import ZoneInfo
 
 
@@ -196,7 +197,20 @@ st.markdown(
 
 BASE_DIR = Path(__file__).resolve().parent
 
-ANNEX_PDF_PATH = BASE_DIR / "data" / "Annex.pdf"
+# Documentation: prefer the reorganised docs/ location, with a fallback to the
+# previous data/Annex.pdf path so local and deployed versions remain compatible.
+ANNEX_PDF_CANDIDATES = [
+    BASE_DIR / "docs" / "Annex_3_Methodologie_Ciblage.pdf",
+    BASE_DIR / "docs" / "Annex.pdf",
+    BASE_DIR / "data" / "Annex.pdf",
+]
+ANNEX_PDF_PATH = next((path for path in ANNEX_PDF_CANDIDATES if path.exists()), ANNEX_PDF_CANDIDATES[0])
+
+GITHUB_REPO_URL = "https://github.com/geoluca-lab/gcf-restoration-dashboard"
+SCREENING_SCRIPT_URL = (
+    GITHUB_REPO_URL
+    + "/blob/main/scripts/gcf_rangeland_screening_local_ANNOTATED.py"
+)
 
 ANNEX_PDF_DATA_URL = ""
 if ANNEX_PDF_PATH.exists():
@@ -352,7 +366,7 @@ LAYER_SITES_PAM = resolve_layer_name(
 
 LAYER_TRANSHUMANCE = resolve_layer_name(
 
-    "transhumance"
+    "trans_merge"
 
 )
 
@@ -1273,7 +1287,7 @@ targetisation = load_vector_layer(
 
 
 # ==================================================
-# HEXAGON SELECTION - source attributes remain available for CSV export.
+# HEXAGON SELECTION - source attributes remain available for Excel export.
 # ==================================================
 
 
@@ -1335,7 +1349,7 @@ def clicked_hex_id(event, hexagons):
 selection_data = prepare_hex_selection_data(targetisation)
 st.session_state.setdefault("selected_hex_ids", set())
 st.session_state.setdefault("hex_comments", {})
-st.session_state.setdefault("last_restored_csv_signature", None)
+st.session_state.setdefault("last_restored_excel_signature", None)
 st.session_state.selected_hex_ids = set(st.session_state.selected_hex_ids) & set(
     selection_data["GRID_ID"]
 )
@@ -1360,22 +1374,42 @@ def clear_hex_selection():
 
 
 def normalize_hex_id_value(value):
+    """Normalize Excel values so numeric GRID_IDs do not become strings such as '1.0'."""
+    if pd.isna(value):
+        return ""
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, (float, np.floating)) and float(value).is_integer():
+        return str(int(value))
     return str(value).strip()
 
 
 def uploaded_file_signature(uploaded_file):
-    """Stable signature so an uploaded CSV is processed only once per content version."""
+    """Stable signature so an uploaded workbook/sheet is processed only once per version."""
     return hashlib.sha256(uploaded_file.getvalue()).hexdigest()
 
 
-def restore_hex_selection_from_csv(uploaded_file):
-    """Restore a selection from a previously exported CSV using GRID_ID."""
+def get_excel_sheet_names(uploaded_file):
+    """Return workbook sheet names without altering the uploaded-file cursor."""
+    try:
+        workbook = pd.ExcelFile(BytesIO(uploaded_file.getvalue()), engine="openpyxl")
+        return workbook.sheet_names
+    except Exception as exc:
+        raise ValueError(f"Le fichier Excel est invalide : {exc}") from exc
+
+
+def restore_hex_selection_from_excel(uploaded_file, sheet_name):
+    """Restore a selection and comments from one selected Excel sheet using GRID_ID."""
     if uploaded_file is None:
         return None
     try:
-        df = pd.read_csv(uploaded_file)
+        df = pd.read_excel(
+            BytesIO(uploaded_file.getvalue()),
+            sheet_name=sheet_name,
+            engine="openpyxl",
+        )
     except Exception as exc:
-        raise ValueError(f"Le fichier CSV est invalide : {exc}") from exc
+        raise ValueError(f"Impossible de lire la feuille '{sheet_name}' : {exc}") from exc
 
     grid_id_columns = []
     for column in df.columns:
@@ -1391,18 +1425,17 @@ def restore_hex_selection_from_csv(uploaded_file):
 
     if not grid_id_columns:
         raise ValueError(
-            "Aucune colonne de GRID_ID n'a été trouvée. "
+            "Aucune colonne de GRID_ID n'a été trouvée dans la feuille sélectionnée. "
             "Le fichier doit contenir l'identifiant de l'hexagone."
         )
 
+    valid_ids = set(selection_data["GRID_ID"].astype(str))
     ids = set()
     restored_comments = {}
     for _, row in df.iterrows():
         for column in grid_id_columns:
             grid_id = normalize_hex_id_value(row.get(column))
-            if not grid_id:
-                continue
-            if grid_id not in set(selection_data["GRID_ID"].astype(str)):
+            if not grid_id or grid_id not in valid_ids:
                 continue
             ids.add(grid_id)
             comment_value = ""
@@ -1417,12 +1450,27 @@ def restore_hex_selection_from_csv(uploaded_file):
 
     if not ids:
         raise ValueError(
-            "Aucun identifiant d'hexagone valide n'a été trouvé dans ce CSV."
+            "Aucun identifiant d'hexagone valide n'a été trouvé dans la feuille sélectionnée."
         )
 
     st.session_state.selected_hex_ids = set(ids)
     st.session_state.hex_comments = restored_comments
     return set(ids)
+
+
+def dataframe_to_excel_bytes(df, sheet_name):
+    """Create an in-memory XLSX workbook for download."""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+        worksheet = writer.book[sheet_name[:31]]
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+        for column_cells in worksheet.columns:
+            values = [str(cell.value) if cell.value is not None else "" for cell in column_cells]
+            max_length = min(max((len(value) for value in values), default=0) + 2, 45)
+            worksheet.column_dimensions[column_cells[0].column_letter].width = max(10, max_length)
+    return output.getvalue()
 
 
 class HexSelectionStyle(MacroElement):
@@ -1471,7 +1519,7 @@ def render_selection_summary(hexagons, detail_data, detail_fields, detail_aliase
         hexagons["GRID_ID"].isin(st.session_state.selected_hex_ids)
     ]
     # Keep tooltip labels and formatting, adding both component scores before
-    # the combined targeting score in the CSV only.
+    # the combined targeting score in the Excel exports only.
     export_fields = list(detail_fields)
     export_labels = {
         field: alias.rstrip(" :")
@@ -1494,7 +1542,7 @@ def render_selection_summary(hexagons, detail_data, detail_fields, detail_aliase
     }
 
     def build_export_table(rows):
-        """Build the same CSV structure for a selection or for all hexagons."""
+        """Build the same Excel table for a selection or for all hexagons."""
         row_ids = rows["GRID_ID"].astype(str)
         export_df = detail_data.loc[
             detail_data["GRID_ID"].astype(str).isin(row_ids),
@@ -1515,134 +1563,148 @@ def render_selection_summary(hexagons, detail_data, detail_fields, detail_aliase
     all_details = build_export_table(hexagons)
     export_date = datetime.now(ZoneInfo("Africa/Ndjamena")).strftime("%Y-%m-%d")
 
+    selected_excel = dataframe_to_excel_bytes(details, "Selection")
+    all_excel = dataframe_to_excel_bytes(all_details, "Hexagones")
+
     with st.container(key="hex_selection_panel"):
-        import_col, totals_col, actions_col = st.columns(
-            [2.2, 3.8, 2.5],
-            vertical_alignment="center",
-            gap="medium",
-        )
+        with st.expander("Sélection des hexagones", expanded=False):
+            import_col, totals_col, actions_col = st.columns(
+                [2.2, 3.8, 2.5],
+                vertical_alignment="center",
+                gap="medium",
+            )
 
-        with import_col:
-            with st.container(key="hex_restore_import_block"):
-                import_label_col, import_upload_col = st.columns(
-                    [1.45, 1.0],
-                    vertical_alignment="center",
-                    gap="small",
-                )
-
-                with import_label_col:
+            with import_col:
+                with st.container(key="hex_restore_import_block"):
                     st.markdown(
-                        """
-                        <div class='selection-restore-copy'>
-                            <div class='selection-section-title'>Recharger une sélection
-                        </div>
-                        """,
+                        "<div class='selection-section-title'>Recharger une sélection précédente</div>",
                         unsafe_allow_html=True,
                     )
-
-                with import_upload_col:
                     uploaded_selection = st.file_uploader(
-                        "Importer un CSV de sélection",
-                        type=["csv"],
+                        "Importer un fichier Excel de sélection",
+                        type=["xlsx"],
                         key="hex_selection_restore_upload",
                         label_visibility="collapsed",
-                        help="Recharge un CSV exporté depuis ce dashboard afin de restaurer la sélection et les commentaires associés.",
+                        help="Recharge un fichier Excel exporté depuis ce dashboard afin de restaurer la sélection et les commentaires associés.",
                     )
+
                     if uploaded_selection is not None:
-                        signature = uploaded_file_signature(uploaded_selection)
-                        if signature != st.session_state.get("last_restored_csv_signature"):
-                            try:
-                                restored_ids = restore_hex_selection_from_csv(uploaded_selection)
-                                if restored_ids is not None:
-                                    st.session_state.last_restored_csv_signature = signature
-                                    st.session_state.restore_selection_toast = (
-                                        f"Sélection restaurée : {len(restored_ids)} hexagones."
+                        try:
+                            sheet_names = get_excel_sheet_names(uploaded_selection)
+                            selected_sheet = st.selectbox(
+                                "Feuille à charger",
+                                options=sheet_names,
+                                key="hex_selection_restore_sheet",
+                                help="Choisissez la feuille Excel contenant les GRID_ID à restaurer.",
+                            )
+                            load_sheet = st.button(
+                                "Charger cette feuille",
+                                key="hex_selection_restore_sheet_button",
+                                use_container_width=True,
+                                help="Restaure les hexagones et les commentaires présents dans la feuille choisie.",
+                            )
+                            if load_sheet:
+                                signature = (
+                                    uploaded_file_signature(uploaded_selection)
+                                    + "::"
+                                    + selected_sheet
+                                )
+                                if signature != st.session_state.get("last_restored_excel_signature"):
+                                    restored_ids = restore_hex_selection_from_excel(
+                                        uploaded_selection,
+                                        selected_sheet,
                                     )
-                                    # The map GeoJSON and its tooltip are built earlier in the run.
-                                    # Rerun once so restored comments are injected before map creation.
-                                    st.rerun()
-                            except ValueError as exc:
-                                st.toast(str(exc), icon="⚠️")
+                                    if restored_ids is not None:
+                                        st.session_state.last_restored_excel_signature = signature
+                                        st.session_state.restore_selection_toast = (
+                                            f"Sélection restaurée : {len(restored_ids)} hexagones "
+                                            f"depuis la feuille « {selected_sheet} »."
+                                        )
+                                        # The map GeoJSON and its tooltip are built earlier in the run.
+                                        # Rerun once so restored comments are injected before map creation.
+                                        st.rerun()
+                        except ValueError as exc:
+                            st.toast(str(exc), icon="⚠️")
                     else:
-                        # Allow the same CSV to be uploaded again after the uploader is cleared.
-                        st.session_state.last_restored_csv_signature = None
+                        # Allow the same workbook/sheet to be uploaded again after clearing the uploader.
+                        st.session_state.last_restored_excel_signature = None
 
                     restore_toast = st.session_state.pop("restore_selection_toast", None)
                     if restore_toast:
                         st.toast(restore_toast, icon="✅")
 
-        with totals_col:
-            population = selected["Pop"].sum() if "Pop" in selected else 0
-            restoration = selected["restoration_potential_ha"].sum()
-            total_area = selected["hex_area_ha"].sum()
-            st.markdown(
-                '<div class="hex-selection-totals">'
-                '<div class="selection-section-title">Sélection actuelle</div>'
-                '<table>'
-                '<tr>'
-                '<td class="metric-label">Hexagones sélectionnés</td>'
-                f'<td class="metric-value"><strong>{len(selected):,}</strong></td>'
-                '<td class="metric-label">Surface totale</td>'
-                f'<td class="metric-value"><strong>{total_area:,.1f} ha</strong></td>'
-                '</tr>'
-                '<tr>'
-                '<td class="metric-label">Population estimée</td>'
-                f'<td class="metric-value"><strong>{population:,.0f}</strong></td>'
-                '<td class="metric-label">Potentiel de restauration</td>'
-                f'<td class="metric-value"><strong>{restoration:,.1f} ha</strong></td>'
-                '</tr>'
-                '</table>'
-                '</div>',
-                unsafe_allow_html=True,
-            )
-
-            if not selected.empty:
-                missing = selected[[c for c in ("Pop", "restoration_potential_ha")
-                                    if c in selected]].isna().sum()
-                if missing.any():
-                    st.caption("Valeurs manquantes exclues des totaux : " + ", ".join(
-                        f"{name} ({count})" for name, count in missing.items() if count
-                    ))
-
-        with actions_col:
-            st.markdown(
-                "<div class='selection-section-title'>Actions</div>",
-                unsafe_allow_html=True,
-            )
-            clear_col, download_selected_col = st.columns(
-                [1.0, 1.25],
-                vertical_alignment="center",
-                gap="small",
-            )
-
-            with clear_col:
-                st.button(
-                    "Effacer la sélection",
-                    on_click=clear_hex_selection,
-                    use_container_width=True,
-                    help="Retire tous les hexagones actuellement sélectionnés sur la carte.",
+            with totals_col:
+                population = selected["Pop"].sum() if "Pop" in selected else 0
+                restoration = selected["restoration_potential_ha"].sum()
+                total_area = selected["hex_area_ha"].sum()
+                st.markdown(
+                    '<div class="hex-selection-totals">'
+                    '<div class="selection-section-title">Sélection actuelle</div>'
+                    '<table>'
+                    '<tr>'
+                    '<td class="metric-label">Hexagones sélectionnés</td>'
+                    f'<td class="metric-value"><strong>{len(selected):,}</strong></td>'
+                    '<td class="metric-label">Surface totale</td>'
+                    f'<td class="metric-value"><strong>{total_area:,.1f} ha</strong></td>'
+                    '</tr>'
+                    '<tr>'
+                    '<td class="metric-label">Population estimée</td>'
+                    f'<td class="metric-value"><strong>{population:,.0f}</strong></td>'
+                    '<td class="metric-label">Potentiel de restauration</td>'
+                    f'<td class="metric-value"><strong>{restoration:,.1f} ha</strong></td>'
+                    '</tr>'
+                    '</table>'
+                    '</div>',
+                    unsafe_allow_html=True,
                 )
 
-            with download_selected_col:
-                st.download_button(
-                    "Télécharger la sélection",
-                    details.to_csv(index=False).encode("utf-8-sig"),
-                    file_name=f"{export_date}_selected_hexagons.csv",
-                    mime="text/csv",
-                    disabled=selected.empty,
-                    use_container_width=True,
-                    help="Télécharge uniquement les hexagones sélectionnés, avec leurs attributs, centroïdes et commentaires.",
+                if not selected.empty:
+                    missing = selected[[c for c in ("Pop", "restoration_potential_ha")
+                                        if c in selected]].isna().sum()
+                    if missing.any():
+                        st.caption("Valeurs manquantes exclues des totaux : " + ", ".join(
+                            f"{name} ({count})" for name, count in missing.items() if count
+                        ))
+
+            with actions_col:
+                st.markdown(
+                    "<div class='selection-section-title'>Actions</div>",
+                    unsafe_allow_html=True,
+                )
+                clear_col, download_selected_col = st.columns(
+                    [1.0, 1.25],
+                    vertical_alignment="center",
+                    gap="small",
                 )
 
-            with st.container(key="download_all_hexagons_link"):
-                st.download_button(
-                    "Télécharger l’ensemble des hexagones",
-                    all_details.to_csv(index=False).encode("utf-8-sig"),
-                    file_name=f"{export_date}_all_hexagons.csv",
-                    mime="text/csv",
-                    use_container_width=False,
-                    help="Télécharge tous les hexagones avec les mêmes attributs et les commentaires disponibles.",
-                )
+                with clear_col:
+                    st.button(
+                        "Effacer la sélection",
+                        on_click=clear_hex_selection,
+                        use_container_width=True,
+                        help="Retire tous les hexagones actuellement sélectionnés sur la carte.",
+                    )
+
+                with download_selected_col:
+                    st.download_button(
+                        "Télécharger la sélection",
+                        selected_excel,
+                        file_name=f"{export_date}_selected_hexagons.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        disabled=selected.empty,
+                        use_container_width=True,
+                        help="Télécharge les hexagones sélectionnés dans un fichier Excel avec leurs attributs, centroïdes et commentaires.",
+                    )
+
+                with st.container(key="download_all_hexagons_link"):
+                    st.download_button(
+                        "Télécharger l’ensemble des hexagones",
+                        all_excel,
+                        file_name=f"{export_date}_all_hexagons.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=False,
+                        help="Télécharge tous les hexagones dans un fichier Excel avec les mêmes attributs et les commentaires disponibles.",
+                    )
 
 
 # ==================================================
@@ -1940,7 +2002,7 @@ population_group.add_to(m)
 
 restoration_group = folium.FeatureGroup(
 
-    name="Parcours pastoraux présentant un potentiel de restauration",
+    name="Parcours pastoraux à potentiel de restauration (2 scénarios)",
 
     overlay=True,
 
@@ -2510,9 +2572,9 @@ tooltip_aliases = [
 
     "Population dans l'hexagone :",
 
-    "Part de l'hexagone en parcours pastoraux présentant un potentiel de restauration :",
+    "Part de l'hexagone en parcours pastoraux à potentiel de restauration :",
 
-    "Superficie des parcours pastoraux présentant un potentiel de restauration :",
+    "Superficie des parcours pastoraux à potentiel de restauration :",
 
     "Distance minimale à la route de transhumance la plus proche :"
 
@@ -2669,7 +2731,7 @@ folium.LayerControl(
 
     position="topleft",
 
-    collapsed=False,
+    collapsed=True,
 
     autoZIndex=False
 
@@ -2740,8 +2802,8 @@ layer_panels = {
     </div>
     """,
 
-    "Parcours pastoraux présentant un potentiel de restauration": """
-    <div class="info-title">Parcours pastoraux présentant un potentiel de restauration</div>
+    "Parcours pastoraux à potentiel de restauration (2 scénarios)": f"""
+    <div class="info-title">Parcours pastoraux à potentiel de restauration (2 scénarios)</div>
     <div class="info-text">
         Cette couche correspond au résultat du <b>screening biophysique</b> : un proxy des parcours
         pastoraux est croisé avec les signes de dégradation, puis avec des indicateurs complémentaires
@@ -2755,6 +2817,10 @@ layer_panels = {
     <div class="methodological-note-footer">
         <b>Référence méthodologique :</b> Annexe 3 – Étapes 3 à 6, « Screening biophysique ».
         Les indicateurs, seuils et règles des deux scénarios sont détaillés dans la note.
+        <br><br>
+        <a href="{SCREENING_SCRIPT_URL}" target="_blank" rel="noopener noreferrer">
+            Voir le script de calcul du potentiel de restauration (GitHub)
+        </a>
     </div>
     """,
 
@@ -2810,9 +2876,11 @@ layer_panels = {
     <div class="info-title">Score final de ciblage</div>
     <div class="info-text">
         Les résultats sont agrégés dans une grille d’<b>hexagones de 25 km²</b>. Le score combine la population estimée
-        (<b>3 classes</b>) et la proportion de superficie présentant un potentiel de restauration (<b>4 classes</b>).
-        Il varie de <b>1 à 7</b> :
-        plus le score est élevé, plus ces deux dimensions sont importantes relativement au reste de la zone d'étude.
+        (<b>3 classes</b>) et la proportion de superficie à potentiel de restauration (<b>4 classes</b>).
+        Pour cette dernière composante, les scénarios <b>Moderate</b> et <b>Conservative</b> sont traités
+        <b>indistinctement</b> : leurs superficies sont comptabilisées ensemble, sans pondération différente entre les deux scénarios.
+        Le score varie de <b>1 à 7</b> : plus le score est élevé, plus ces deux dimensions sont importantes
+        relativement au reste de la zone d'étude.
         <br><br>
         Les distances aux routes de transhumance et aux sites du PAM sont affichées comme informations
         complémentaires et <b>ne sont pas intégrées au score</b>.
@@ -2914,6 +2982,14 @@ class LayerInfoControl(
         self.methodology_url = json.dumps(
 
             ANNEX_PDF_DATA_URL,
+
+            ensure_ascii=False
+
+        )
+
+        self.github_repo_url = json.dumps(
+
+            GITHUB_REPO_URL,
 
             ensure_ascii=False
 
@@ -4551,9 +4627,14 @@ class LayerInfoControl(
 
                                         }
 
-                                        if (top + popupRect.height > window.innerHeight - margin) {
+                                        // Reserve the lower part of the viewport for the hexagon-selection panel.
+                                        // This keeps information popovers readable on single-screen setups.
+                                        const bottomReserve = 150;
+                                        const availableBottom = window.innerHeight - bottomReserve;
 
-                                            top = window.innerHeight - popupRect.height - margin;
+                                        if (top + popupRect.height > availableBottom) {
+
+                                            top = availableBottom - popupRect.height;
 
                                         }
 
@@ -4918,7 +4999,7 @@ class LayerInfoControl(
 
                         mapTitle.innerHTML =
 
-                            "Ciblage des parcours pastoraux présentant un potentiel de restauration – SCALE - GCF";
+                            "Ciblage des parcours pastoraux à potentiel de restauration – SCALE - GCF";
 
 
 
@@ -5008,7 +5089,8 @@ class LayerInfoControl(
 
                         methodologicalFooter.innerHTML =
 
-                            '<a href="' + {{ this.methodology_url }} + '" download="Annex.pdf" target="_blank" rel="noopener noreferrer">Télécharger la note méthodologique (Annexe 3)</a>';
+                            '<a href="' + {{ this.methodology_url }} + '" download="Annex_3_Methodologie_Ciblage.pdf" target="_blank" rel="noopener noreferrer">Télécharger la note méthodologique (Annexe 3)</a>' +
+                            '<br><a href="' + {{ this.github_repo_url }} + '" target="_blank" rel="noopener noreferrer">Accéder au dépôt GitHub du projet</a>';
 
 
 
@@ -5072,7 +5154,7 @@ class LayerInfoControl(
 
                             "Zone d'étude",
 
-                            "Parcours pastoraux présentant un potentiel de restauration",
+                            "Parcours pastoraux à potentiel de restauration (2 scénarios)",
 
                             "Population estimée (2026)",
 
@@ -5185,7 +5267,7 @@ layer_objects = [
     ),
 
     (
-        "Parcours pastoraux présentant un potentiel de restauration",
+        "Parcours pastoraux à potentiel de restauration (2 scénarios)",
         restoration_group
     ),
 
@@ -5276,118 +5358,93 @@ m.fit_bounds(
 
 
 
-# Float above the map, opposite the existing bottom-right methodology panel.
+# Compact, collapsible selection panel for single-screen use.
 st.markdown("""
 <style>
 .st-key-hex_selection_panel {
-    position: fixed; bottom: 24px; left: 115px; z-index: 1000;
-    width: min(1320px, calc(100vw - 145px)); padding: 10px 12px;
-    background: rgba(255,255,255,0.97); color: #333;
-    border: 1px solid #d7d7d7; border-radius: 8px;
-    box-shadow: 0 1px 6px rgba(0,0,0,0.22); font: 12px Arial, sans-serif;
+    position: fixed; bottom: 12px; left: 12px; z-index: 1000;
+    width: min(1320px, calc(100vw - 24px));
+    background: transparent !important; color: #333;
+    padding: 0 !important; margin: 0 !important;
+    box-sizing: border-box;
+    font: 12px Arial, sans-serif;
 }
-.st-key-hex_selection_panel {
-    display: block !important; height: auto !important;
-    max-height: none !important; overflow: visible !important; box-sizing: border-box;
+
+/* When closed, keep only a small tab visible. Chrome/Edge support :has(). */
+.st-key-hex_selection_panel:has(details:not([open])) {
+    width: 245px !important;
 }
-.st-key-hex_selection_panel > div[data-testid="stVerticalBlock"] {
-    display: flex !important; flex-direction: row !important; align-items: center !important;
-    gap: 10px !important;
+
+.st-key-hex_selection_panel [data-testid="stExpander"] {
+    width: 100% !important;
+    margin: 0 !important;
 }
+.st-key-hex_selection_panel [data-testid="stExpander"] details {
+    background: rgba(255,255,255,0.97) !important;
+    border: 1px solid #d7d7d7 !important;
+    border-radius: 8px !important;
+    box-shadow: 0 1px 6px rgba(0,0,0,0.22) !important;
+    overflow: visible !important;
+}
+.st-key-hex_selection_panel [data-testid="stExpander"] summary {
+    min-height: 34px !important;
+    padding: 5px 10px !important;
+    font-size: 11px !important;
+    font-weight: 700 !important;
+    color: #444 !important;
+}
+.st-key-hex_selection_panel [data-testid="stExpander"] details[open] summary {
+    border-bottom: 1px solid #e5e5e5 !important;
+}
+.st-key-hex_selection_panel [data-testid="stExpanderDetails"] {
+    padding: 8px 10px 9px !important;
+}
+
 .st-key-hex_selection_panel [data-testid="stHorizontalBlock"] {
-    flex: 1 1 0 !important; min-width: 0 !important;
-    height: auto !important; margin-top: 0 !important;
-    display: flex !important; align-items: center !important;
+    min-width: 0 !important;
+    height: auto !important;
+    margin-top: 0 !important;
+    align-items: center !important;
 }
 .st-key-hex_selection_panel [data-testid="stElementContainer"] {
-    height: auto !important; flex: none !important;
+    min-width: 0 !important;
 }
+
 .st-key-hex_restore_import_block {
-    background: rgba(49, 51, 63, 0.08) !important;
-    border: 1px solid rgba(49, 51, 63, 0.12) !important;
+    background: rgba(49, 51, 63, 0.06) !important;
+    border: 1px solid rgba(49, 51, 63, 0.10) !important;
     border-radius: 0.45rem !important;
     padding: 6px 8px !important;
     margin: 0 !important;
     box-sizing: border-box !important;
 }
-.st-key-hex_restore_import_block [data-testid="stHorizontalBlock"] {
-    gap: 10px !important;
-    align-items: center !important;
-    margin: 0 !important;
-    display: flex !important;
-    width: 100% !important;
-    flex-wrap: nowrap !important;
+.st-key-hex_restore_import_block [data-testid="stFileUploader"] {
+    margin: 2px 0 4px !important;
 }
-.st-key-hex_restore_import_block [data-testid="stHorizontalBlock"] > div {
-    min-width: 0 !important;
-    display: flex !important;
-    align-items: center !important;
-}
-.st-key-hex_restore_import_block [data-testid="stHorizontalBlock"] > div:first-child {
-    flex: 1 1 0 !important;
-    width: auto !important;
-    justify-content: flex-start !important;
-    min-width: 0 !important;
-}
-.st-key-hex_restore_import_block [data-testid="stHorizontalBlock"] > div:last-child {
-    flex: 0 0 190px !important;
-    width: 190px !important;
-    justify-content: flex-end !important;
-}
-.st-key-hex_selection_panel [data-testid="stFileUploader"] {
-    width: 100% !important; max-width: 100% !important;
-    min-width: 0 !important;
-    margin: 0 !important;
-    font-size: 12px !important;
-    display: flex !important;
-    align-items: center !important;
-    justify-content: flex-end !important;
-}
-.st-key-hex_selection_panel [data-testid="stFileUploader"] section {
-    width: 100% !important;
-    max-width: 190px !important;
-    padding: 4px 10px !important;
-    background: rgba(255, 255, 255, 0.75) !important;
+.st-key-hex_restore_import_block [data-testid="stFileUploader"] section {
+    min-height: 32px !important;
+    padding: 4px 8px !important;
+    background: rgba(255,255,255,0.78) !important;
     border: 1px solid rgba(49, 51, 63, 0.12) !important;
-    border-radius: 0.45rem !important;
+    border-radius: 0.4rem !important;
+}
+.st-key-hex_restore_import_block [data-testid="stFileUploaderFileName"] {
+    font-size: 10px !important;
+}
+.st-key-hex_restore_import_block [data-testid="stSelectbox"] {
+    margin-top: 2px !important;
+}
+.st-key-hex_restore_import_block [data-testid="stSelectbox"] > div > div {
     min-height: 30px !important;
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    box-sizing: border-box !important;
-    margin: 0 !important;
+    font-size: 10.5px !important;
 }
-.st-key-hex_selection_panel [data-testid="stFileUploaderFileName"] {
-    display: none !important;
-}
-.st-key-hex_selection_panel [data-testid="stFileUploader"] > div {
-    margin: 0 !important;
-    padding: 0 !important;
-}
-.st-key-hex_selection_panel [data-testid="stFileUploader"] section > div:last-child {
-    display: none !important;
-}
-.st-key-hex_selection_panel .selection-restore-copy {
-    box-sizing: border-box;
-    display: block !important;
-    width: 100% !important;
-    max-width: 100% !important;
-    padding: 0 4px 0 0 !important;
-    margin: 0 !important;
-}
+
 .st-key-hex_selection_panel .selection-section-title {
     font-size: 11px;
     font-weight: 700;
     color: #444;
     line-height: 1.2;
     margin: 0 0 3px 0;
-}
-.st-key-hex_selection_panel .selection-help-text {
-    font-size: 10.5px;
-    font-weight: 400;
-    color: #6a6a6a;
-    line-height: 1.25;
-    white-space: normal;
 }
 
 .st-key-download_all_hexagons_link {
@@ -5417,6 +5474,7 @@ st.markdown("""
     background: transparent !important;
     border: none !important;
 }
+
 .st-key-hex_selection_panel .hex-selection-totals {
     display: block;
     width: 100%;
@@ -5446,11 +5504,22 @@ st.markdown("""
 }
 .st-key-hex_selection_panel button {
     font-size: 10.5px;
-    min-height: 36px;
-    width: 100%;
+    min-height: 34px;
     padding: 0.3rem 0.45rem !important;
     white-space: normal !important;
     line-height: 1.15 !important;
+}
+
+/* Give the map maximum room on narrower / single-screen setups. */
+@media (max-width: 1200px) {
+    .st-key-hex_selection_panel {
+        width: calc(100vw - 16px) !important;
+        left: 8px !important;
+        bottom: 8px !important;
+    }
+    .st-key-hex_selection_panel:has(details:not([open])) {
+        width: 230px !important;
+    }
 }
 </style>
 """, unsafe_allow_html=True)
