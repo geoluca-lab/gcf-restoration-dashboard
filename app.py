@@ -2769,7 +2769,7 @@ layer_panels = {
         Zone d'étude
     </div>
     <div class="methodological-note-footer">
-        <b>Référence méthodologique :</b> Annexe 3 – Étape 2, « Délimitation de la zone d'étude ».
+        <b>Référence méthodologique :</b> Étape 2, « Délimitation de la zone d'étude ».
         Voir la note méthodologique téléchargeable dans ce panneau.
     </div>
     """,
@@ -2796,7 +2796,7 @@ layer_panels = {
         <span class="source-text">Source : ESA WorldCover 2021 v2.</span>
     </div>
     <div class="methodological-note-footer">
-        <b>Référence méthodologique :</b> Annexe 3 – Étape 1, « Cadre conceptuel : couverture du sol,
+        <b>Référence méthodologique :</b>  Étape 1, « Cadre conceptuel : couverture du sol,
         utilisation du sol et parcours pastoraux », puis Étape 3 pour le proxy GPW.
     </div>
     """,
@@ -2814,7 +2814,7 @@ layer_panels = {
     <div class="legend-row"><span class="square" style="background:#2B6CB0;"></span>Moderate</div>
     <div class="legend-row"><span class="square" style="background:#08306B;"></span>Conservative</div>
     <div class="methodological-note-footer">
-        <b>Référence méthodologique :</b> Annexe 3 – Étapes 3 à 6, « Screening biophysique ».
+        <b>Référence méthodologique :</b>  Étapes 3 à 6, « Screening biophysique ».
         Les indicateurs, seuils et règles des deux scénarios sont détaillés dans la note.
         <br><br>
         <a href="{SCREENING_SCRIPT_URL}" target="_blank" rel="noopener noreferrer">
@@ -2836,7 +2836,7 @@ layer_panels = {
     <div class="population-gradient"></div>
     <div class="gradient-labels"><span>Faible</span><span>Élevée</span></div>
     <div class="methodological-note-footer">
-        <b>Référence méthodologique :</b> Annexe 3 – Étape 7, « Intégration de la densité de population ».
+        <b>Référence méthodologique :</b>  Étape 7, « Intégration de la densité de population ».
     </div>
     """,
 
@@ -2851,7 +2851,7 @@ layer_panels = {
     <div class="info-legend-title">Route</div>
     <div class="legend-row"><span class="line-symbol" style="border-color:#E67E22;"></span>Route de transhumance</div>
     <div class="methodological-note-footer">
-        <b>Référence méthodologique :</b> Annexe 3 – Étape 8, « Données de transhumance et des interventions du PAM ».
+        <b>Référence méthodologique :</b>  Étape 8, « Données de transhumance et des interventions du PAM ».
     </div>
     """,
 
@@ -2867,7 +2867,7 @@ layer_panels = {
     <div class="info-legend-title">Site</div>
     <div class="legend-row"><span class="point-symbol"></span>Site d'intervention PAM</div>
     <div class="methodological-note-footer">
-        <b>Référence méthodologique :</b> Annexe 3 – Étape 8, « Données de transhumance et des interventions du PAM ».
+        <b>Référence méthodologique :</b>  Étape 8, « Données de transhumance et des interventions du PAM ».
     </div>
     """,
 
@@ -2895,7 +2895,7 @@ layer_panels = {
         <span class="score-legend-item"><span class="square" style="background:#B30000;"></span>7</span>
     </div>
     <div class="methodological-note-footer">
-        <b>Référence méthodologique :</b> Annexe 3 – Étape 9, « Construction du score final de ciblage ».
+        <b>Référence méthodologique :</b>  Étape 9, « Construction du score final de ciblage ».
         L'utilisation de ce score dans le dashboard est décrite à l'Étape 10.
     </div>
     """
@@ -5088,7 +5088,7 @@ class LayerInfoControl(
 
                         methodologicalFooter.innerHTML =
 
-                            '<a href="' + {{ this.methodology_url }} + '" download="Annex_3_Methodologie_Ciblage.pdf" target="_blank" rel="noopener noreferrer">Télécharger la note méthodologique (Annexe 3)</a>' +
+                            '<a href="' + {{ this.methodology_url }} + '" download="Annex_3_Methodologie_Ciblage.pdf" target="_blank" rel="noopener noreferrer">Télécharger la note méthodologique </a>' +
                             '<br><a href="' + {{ this.github_repo_url }} + '" target="_blank" rel="noopener noreferrer">Accéder au dépôt GitHub du projet</a>';
 
 
