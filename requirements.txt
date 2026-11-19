@@ -1,6 +1,6 @@
 streamlit
 folium
-streamlit-folium
+streamlit-folium>=0.27.4
 geopandas
 pyogrio
 rasterio
@@ -9,3 +9,4 @@ Pillow
 affine
 branca
 jinja2
+openpyxl

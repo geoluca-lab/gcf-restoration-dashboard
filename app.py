@@ -1569,22 +1569,21 @@ def render_selection_summary(hexagons, detail_data, detail_fields, detail_aliase
     with st.container(key="hex_selection_panel"):
         with st.expander("Sélection des hexagones", expanded=False):
             import_col, totals_col, actions_col = st.columns(
-                [2.2, 3.8, 2.5],
+                [2.7, 4.3, 2.7],
                 vertical_alignment="center",
                 gap="medium",
             )
 
             with import_col:
                 with st.container(key="hex_restore_import_block"):
-                    st.markdown(
-                        "<div class='selection-section-title'>Recharger une sélection précédente</div>",
-                        unsafe_allow_html=True,
-                    )
+                    # Use the uploader's native label instead of a separate HTML title.
+                    # This keeps the title in Streamlit's normal layout flow and prevents
+                    # it from being overlapped by the compact dropzone on narrow screens.
                     uploaded_selection = st.file_uploader(
-                        "Importer un fichier Excel de sélection",
+                        "Recharger une sélection précédente",
                         type=["xlsx"],
                         key="hex_selection_restore_upload",
-                        label_visibility="collapsed",
+                        label_visibility="visible",
                         help="Recharge un fichier Excel exporté depuis ce dashboard afin de restaurer la sélection et les commentaires associés.",
                     )
 
@@ -5397,7 +5396,7 @@ st.markdown("""
     border-bottom: 1px solid #e5e5e5 !important;
 }
 .st-key-hex_selection_panel [data-testid="stExpanderDetails"] {
-    padding: 8px 10px 9px !important;
+    padding: 9px 11px 10px !important;
 }
 
 .st-key-hex_selection_panel [data-testid="stHorizontalBlock"] {
@@ -5411,32 +5410,77 @@ st.markdown("""
 }
 
 .st-key-hex_restore_import_block {
-    background: rgba(49, 51, 63, 0.06) !important;
+    background: rgba(49, 51, 63, 0.055) !important;
     border: 1px solid rgba(49, 51, 63, 0.10) !important;
     border-radius: 0.45rem !important;
-    padding: 6px 8px !important;
+    padding: 7px 10px 8px !important;
     margin: 0 !important;
     box-sizing: border-box !important;
 }
 .st-key-hex_restore_import_block [data-testid="stFileUploader"] {
-    margin: 2px 0 4px !important;
+    margin: 0 !important;
+    padding: 0 !important;
 }
-.st-key-hex_restore_import_block [data-testid="stFileUploader"] section {
-    min-height: 32px !important;
-    padding: 4px 8px !important;
-    background: rgba(255,255,255,0.78) !important;
-    border: 1px solid rgba(49, 51, 63, 0.12) !important;
+/* Native uploader label: stays above the upload control without overlap. */
+.st-key-hex_restore_import_block [data-testid="stWidgetLabel"] {
+    margin: 0 0 6px 0 !important;
+    padding: 0 !important;
+    min-height: 14px !important;
+}
+.st-key-hex_restore_import_block [data-testid="stWidgetLabel"] p {
+    margin: 0 !important;
+    padding: 0 !important;
+    font-size: 11px !important;
+    font-weight: 700 !important;
+    line-height: 1.2 !important;
+    color: #444 !important;
+    white-space: normal !important;
+}
+/* Compact uploader: keep the action, remove Streamlit's drag/drop and size copy. */
+.st-key-hex_restore_import_block [data-testid="stFileUploaderDropzone"] {
+    min-height: 34px !important;
+    padding: 0 !important;
+    background: rgba(255,255,255,0.86) !important;
+    border: 1px solid rgba(49, 51, 63, 0.14) !important;
     border-radius: 0.4rem !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+.st-key-hex_restore_import_block [data-testid="stFileUploaderDropzoneInstructions"] {
+    display: none !important;
+}
+.st-key-hex_restore_import_block [data-testid="stFileUploader"] small {
+    display: none !important;
+}
+.st-key-hex_restore_import_block [data-testid="stFileUploaderDropzone"] button {
+    min-height: 32px !important;
+    height: 32px !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0.25rem 0.65rem !important;
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    font-size: 10.5px !important;
+    font-weight: 600 !important;
+}
+.st-key-hex_restore_import_block [data-testid="stFileUploaderFile"] {
+    margin-top: 5px !important;
+    padding: 4px 6px !important;
 }
 .st-key-hex_restore_import_block [data-testid="stFileUploaderFileName"] {
     font-size: 10px !important;
 }
 .st-key-hex_restore_import_block [data-testid="stSelectbox"] {
-    margin-top: 2px !important;
+    margin-top: 6px !important;
 }
 .st-key-hex_restore_import_block [data-testid="stSelectbox"] > div > div {
     min-height: 30px !important;
     font-size: 10.5px !important;
+}
+.st-key-hex_restore_import_block .stButton {
+    margin-top: 4px !important;
 }
 
 .st-key-hex_selection_panel .selection-section-title {
