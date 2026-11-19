@@ -209,7 +209,7 @@ ANNEX_PDF_PATH = next((path for path in ANNEX_PDF_CANDIDATES if path.exists()), 
 GITHUB_REPO_URL = "https://github.com/geoluca-lab/gcf-restoration-dashboard"
 SCREENING_SCRIPT_URL = (
     GITHUB_REPO_URL
-    + "/blob/main/scripts/gcf_rangeland_screening_local_ANNOTATED.py"
+    + "/blob/main/scripts/gcf_rangeland_screening_local_ANNOTATED.ipynb"
 )
 
 ANNEX_PDF_DATA_URL = ""
